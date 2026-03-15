@@ -359,7 +359,7 @@ function ZoneBadge({ active }: { active: boolean }) {
       active ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-400"
     )}>
       <span className={cn("h-1.5 w-1.5 rounded-full", active ? "bg-emerald-500" : "bg-slate-300")} />
-      {active ? "true" : "false"}
+      {active ? "Active" : "Inactive"}
     </span>
   );
 }

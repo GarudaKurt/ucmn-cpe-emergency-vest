@@ -137,14 +137,13 @@ interface RegisterForm {
 
 const FORM_EMPTY: RegisterForm = { name: "", age: "", department: "", assignedVest: "" };
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 
-const VEST_KEYS = ["Vest1", "Vest2"] as const;
+const VEST_KEYS = ["vest1", "vest2"] as const;
 type VestKey = typeof VEST_KEYS[number];
 
 const VEST_META: Record<VestKey, { rfidTag: string }> = {
-  Vest1: { rfidTag: "A1B2C3" },
-  Vest2: { rfidTag: "D4E5F6" },
+  vest1: { rfidTag: "A1B2C3" },
+  vest2: { rfidTag: "D4E5F6" },
 };
 
 const DEPARTMENTS = [
@@ -154,7 +153,6 @@ const DEPARTMENTS = [
 
 const THRESHOLDS = { dust: 50, coGas: 1.0, aqi: 150, temp: 37.0 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function parseVestData(raw: RawVestData) {
   const dhtRaw   = String(raw.dht22);
@@ -198,13 +196,12 @@ async function saveEventLog(vestId: string, entry: EventLogEntry) {
   } catch (err) { console.error("eventLogs write error:", err); }
 }
 
-/** Fetch ALL personnel records for a vest, newest first (sorted client-side — no composite index needed) */
 async function fetchVestPersonnel(vestId: string): Promise<PersonnelRecord[]> {
   try {
     const q    = query(collection(firestore, "registeredPersonnel"), where("assignedVest", "==", vestId));
     const snap = await getDocs(q);
     const docs = snap.docs.map((d) => ({ docId: d.id, ...(d.data() as Omit<PersonnelRecord, "docId">) }));
-    // Sort newest-first client-side — avoids needing a composite Firestore index
+
     return docs.sort((a, b) => {
       const at = a.registeredAt?.toMillis() ?? 0;
       const bt = b.registeredAt?.toMillis() ?? 0;
@@ -221,11 +218,9 @@ async function fetchEventLogs(vestId: string): Promise<EventLogEntry[]> {
   } catch (err) { console.error("eventLogs fetch error:", err); return []; }
 }
 
-/** Fetch only the current active (non-returned) user for a vest — no composite index needed */
 async function fetchActiveUser(vestId: string): Promise<PersonnelRecord | null> {
   try {
-    // Query only on assignedVest (single-field index, always exists by default)
-    // then filter isReturned and sort client-side to avoid needing a composite index
+
     const q    = query(collection(firestore, "registeredPersonnel"), where("assignedVest", "==", vestId));
     const snap = await getDocs(q);
     if (snap.empty) return null;

@@ -967,7 +967,7 @@ export default function SaVestDashboard() {
   const [formErrors, setFormErrors]   = useState<Partial<RegisterForm>>({});
   const [saving, setSaving]           = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [selectedVest, setSelectedVest] = useState<VestKey>("Vest1");
+  const [selectedVest, setSelectedVest] = useState<VestKey>("vest1");
 
   /**
    * activeUserMap — keyed by vestId.

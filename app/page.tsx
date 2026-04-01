@@ -63,15 +63,8 @@ import {
 } from "firebase/firestore";
 
 
-// ─── Fall Detection Thresholds ────────────────────────────────────────────────
-// Based on Bourke et al. (2007) bi-axial gyroscope study
-const FALL_THRESHOLDS = {
-  angularVelocity:     3.1,   // rad/s   — FT1
-  angularAcceleration: 0.05,  // rad/s²  — FT2
-  trunkAngle:          0.59,  // rad     — FT3
-  tiltAngle:           60,    // degrees — posture confirmation
-  confirmSeconds:      9,     // seconds — sustained fallen orientation
-};
+// ─── Fall Detection: ESP32 sends a boolean `fallDetected` field ───────────────
+const FALL_CONFIRM_SECONDS = 9;
 
 // ─── Circumference for the SVG countdown ring (r = 38) ───────────────────────
 const RING_CIRC = 2 * Math.PI * 38; // ≈ 238.76
@@ -79,49 +72,36 @@ const RING_CIRC = 2 * Math.PI * 38; // ≈ 238.76
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface RawVestData {
-  dht22:               string | number;
-  dust:                string | number;
-  mq135:               string | number;
-  mq9:                 string | number;
-  zoneA:               boolean;
-  zoneB:               boolean;
-  // Gyroscope fields sent by ESP32 (all in same Firebase node)
-  angularVelocity?:     string | number;
-  angularAcceleration?: string | number;
-  trunkAngle?:          string | number;
-  tiltAngle?:           string | number;
+  dht22:         string | number;
+  dust:          string | number;
+  mq135:         string | number;
+  mq9:           string | number;
+  zoneA:         boolean;
+  zoneB:         boolean;
+  fallDetected?: boolean; // ESP32 handles fall logic, sends true/false
 }
 
 interface Vest {
-  id:                  string;
-  name:                string;
-  rfidTag:             string;
-  status:              "online" | "offline" | "alert" | "rescue" | "fall";
-  zoneA:               boolean;
-  zoneB:               boolean;
-  temp:                number;
-  humidity:            number;
-  dust:                number;
-  aqi:                 number;
-  coGas:               number;
-  // Gyroscope readings
-  angularVelocity:     number;
-  angularAcceleration: number;
-  trunkAngle:          number;
-  tiltAngle:           number;
-  // Derived threshold flags
-  ft1Met:              boolean;
-  ft2Met:              boolean;
-  ft3Met:              boolean;
-  allFallThresholdsMet: boolean;
+  id:           string;
+  name:         string;
+  rfidTag:      string;
+  status:       "online" | "offline" | "alert" | "rescue" | "fall";
+  zoneA:        boolean;
+  zoneB:        boolean;
+  temp:         number;
+  humidity:     number;
+  dust:         number;
+  aqi:          number;
+  coGas:        number;
+  fallDetected: boolean;
 }
 
 // Per-vest fall state managed via refs (avoids re-render storms from timers)
 interface VestFallState {
-  inCountdown:    boolean;
-  confirmed:      boolean;
-  secondsLeft:    number;
-  intervalId:     ReturnType<typeof setInterval> | null;
+  inCountdown:  boolean;
+  confirmed:    boolean;
+  secondsLeft:  number;
+  intervalId:   ReturnType<typeof setInterval> | null;
 }
 
 interface AlertLog {
@@ -138,19 +118,16 @@ interface AlertLog {
 }
 
 interface EventLogEntry {
-  timestamp:           string;
-  temp:                number;
-  humidity:            number;
-  dust:                number;
-  aqi:                 number;
-  coGas:               number;
-  status:              string;
-  zoneA:               boolean;
-  zoneB:               boolean;
-  angularVelocity:     number;
-  angularAcceleration: number;
-  trunkAngle:          number;
-  tiltAngle:           number;
+  timestamp:    string;
+  temp:         number;
+  humidity:     number;
+  dust:         number;
+  aqi:          number;
+  coGas:        number;
+  status:       string;
+  zoneA:        boolean;
+  zoneB:        boolean;
+  fallDetected: boolean;
 }
 
 interface PersonnelRecord {
@@ -194,45 +171,29 @@ function parseVestData(raw: RawVestData) {
   const dhtRaw   = String(raw.dht22);
   const dhtParts = dhtRaw.includes(";") ? dhtRaw.split(";") : [dhtRaw, "0"];
 
-  const angularVelocity     = Number(raw.angularVelocity)     || 0;
-  const angularAcceleration = Number(raw.angularAcceleration) || 0;
-  const trunkAngle          = Number(raw.trunkAngle)          || 0;
-  const tiltAngle           = Number(raw.tiltAngle)           || 0;
-
-  const ft1Met = angularVelocity     > FALL_THRESHOLDS.angularVelocity;
-  const ft2Met = angularAcceleration > FALL_THRESHOLDS.angularAcceleration;
-  const ft3Met = trunkAngle          > FALL_THRESHOLDS.trunkAngle;
-
   return {
-    temp:     Number(dhtParts[0]) || 0,
-    humidity: Number(dhtParts[1]) || 0,
-    dust:     Number(raw.dust)    || 0,
-    aqi:      Number(raw.mq135)   || 0,
-    coGas:    Number(raw.mq9)     || 0,
-    zoneA:    Boolean(raw.zoneA),
-    zoneB:    Boolean(raw.zoneB),
-    angularVelocity,
-    angularAcceleration,
-    trunkAngle,
-    tiltAngle,
-    ft1Met,
-    ft2Met,
-    ft3Met,
-    allFallThresholdsMet: ft1Met && ft2Met && ft3Met,
+    temp:         Number(dhtParts[0]) || 0,
+    humidity:     Number(dhtParts[1]) || 0,
+    dust:         Number(raw.dust)    || 0,
+    aqi:          Number(raw.mq135)   || 0,
+    coGas:        Number(raw.mq9)     || 0,
+    zoneA:        Boolean(raw.zoneA),
+    zoneB:        Boolean(raw.zoneB),
+    fallDetected: Boolean(raw.fallDetected),
   };
 }
 
 function deriveStatus(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean): Vest["status"] {
-  if (fallConfirmed)                                                          return "fall";
-  if (s.temp  > THRESHOLDS.temp)                                              return "rescue";
-  if (s.dust  > THRESHOLDS.dust || s.coGas > THRESHOLDS.coGas || s.aqi > THRESHOLDS.aqi) return "alert";
+  if (fallConfirmed)                                                                            return "fall";
+  if (s.temp  > THRESHOLDS.temp)                                                               return "rescue";
+  if (s.dust  > THRESHOLDS.dust || s.coGas > THRESHOLDS.coGas || s.aqi > THRESHOLDS.aqi)      return "alert";
   return "online";
 }
 
 function deriveAlertType(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean): string | null {
-  if (fallConfirmed)             return "Fall Detected";
-  if (s.temp  > THRESHOLDS.temp) return "Need Rescue";
-  if (s.dust  > THRESHOLDS.dust) return "High Dust";
+  if (fallConfirmed)              return "Fall Detected";
+  if (s.temp  > THRESHOLDS.temp)  return "Need Rescue";
+  if (s.dust  > THRESHOLDS.dust)  return "High Dust";
   if (s.coGas > THRESHOLDS.coGas) return "High CO Gas";
   if (s.aqi   > THRESHOLDS.aqi)   return "High AQI";
   return null;
@@ -334,21 +295,21 @@ async function assignUserToVest(user: UniqueUser, vestId: string): Promise<void>
 // ─── Status Config ────────────────────────────────────────────────────────────
 
 const statusConfig: Record<Vest["status"], { label: string; className: string; dot: string }> = {
-  online:  { label: "Online",       className: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500" },
-  offline: { label: "Offline",      className: "border-slate-200 bg-slate-50 text-slate-500",       dot: "bg-slate-400" },
-  alert:   { label: "Alert",        className: "border-amber-200 bg-amber-50 text-amber-700",       dot: "bg-amber-500 animate-pulse" },
-  rescue:  { label: "Need Rescue",  className: "border-red-200 bg-red-50 text-red-700",             dot: "bg-red-500 animate-pulse" },
-  fall:    { label: "Fall Detected",className: "border-red-300 bg-red-100 text-red-800",            dot: "bg-red-600 animate-ping" },
+  online:  { label: "Online",        className: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500" },
+  offline: { label: "Offline",       className: "border-slate-200 bg-slate-50 text-slate-500",       dot: "bg-slate-400" },
+  alert:   { label: "Alert",         className: "border-amber-200 bg-amber-50 text-amber-700",       dot: "bg-amber-500 animate-pulse" },
+  rescue:  { label: "Need Rescue",   className: "border-red-200 bg-red-50 text-red-700",             dot: "bg-red-500 animate-pulse" },
+  fall:    { label: "Fall Detected", className: "border-red-300 bg-red-100 text-red-800",            dot: "bg-red-600 animate-ping" },
 };
 
 // ─── Fall Detection Panel ─────────────────────────────────────────────────────
-// Displays live gyroscope readings, threshold indicators, countdown ring,
-// and confirmed-fall alert for the currently selected vest.
+// Shows countdown ring and confirmed-fall alert.
+// The ESP32 handles all gyroscope logic and sends `fallDetected: true/false`.
 
 interface FallPanelProps {
-  vest:          Vest | undefined;
-  fallState:     VestFallState;
-  onResetFall:   () => void;
+  vest:        Vest | undefined;
+  fallState:   VestFallState;
+  onResetFall: () => void;
 }
 
 function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
@@ -358,20 +319,8 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
   const ringOffset = confirmed
     ? 0
     : inCountdown
-      ? RING_CIRC * (1 - secondsLeft / FALL_THRESHOLDS.confirmSeconds)
+      ? RING_CIRC * (1 - secondsLeft / FALL_CONFIRM_SECONDS)
       : RING_CIRC;
-
-  // Bar percentage helpers
-  const velPct  = Math.min((vest.angularVelocity     / (FALL_THRESHOLDS.angularVelocity * 2))     * 100, 100);
-  const accPct  = Math.min((vest.angularAcceleration / (FALL_THRESHOLDS.angularAcceleration * 4)) * 100, 100);
-  const angPct  = Math.min((vest.trunkAngle          / (FALL_THRESHOLDS.trunkAngle * 2))          * 100, 100);
-  const tiltPct = Math.min((vest.tiltAngle           / 90)                                        * 100, 100);
-
-  function barColor(pct: number, met: boolean) {
-    if (met)        return "bg-red-500";
-    if (pct > 60)   return "bg-amber-400";
-    return "bg-blue-400";
-  }
 
   return (
     <div className={cn(
@@ -390,11 +339,11 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
             "h-8 w-8 rounded-lg flex items-center justify-center",
             confirmed ? "bg-red-100" : "bg-slate-100"
           )}>
-            <TbRotate  className={cn("text-lg", confirmed ? "text-red-600 animate-spin" : "text-slate-500")} />
+            <TbRotate className={cn("text-lg", confirmed ? "text-red-600 animate-spin" : "text-slate-500")} />
           </div>
           <div>
             <p className="text-slate-800 text-sm font-semibold leading-tight">Fall Detection</p>
-            <p className="text-slate-400 text-xs">{vest.id} · gyroscope monitor</p>
+            <p className="text-slate-400 text-xs">{vest.id} · ESP32 fall signal</p>
           </div>
         </div>
         {confirmed && (
@@ -406,55 +355,6 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
             <FiRotateCcw className="text-xs" /> Reset
           </Button>
         )}
-      </div>
-
-      {/* ── Gyroscope metric bars ── */}
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        {[
-          { label: "Angular velocity", value: vest.angularVelocity.toFixed(2),     unit: "rad/s",  pct: velPct,  met: vest.ft1Met, thresh: `FT1 › ${FALL_THRESHOLDS.angularVelocity}` },
-          { label: "Angular accel.",   value: vest.angularAcceleration.toFixed(3), unit: "rad/s²", pct: accPct,  met: vest.ft2Met, thresh: `FT2 › ${FALL_THRESHOLDS.angularAcceleration}` },
-          { label: "Trunk angle",      value: vest.trunkAngle.toFixed(2),          unit: "rad",    pct: angPct,  met: vest.ft3Met, thresh: `FT3 › ${FALL_THRESHOLDS.trunkAngle}` },
-          { label: "Tilt angle",       value: vest.tiltAngle.toFixed(1),           unit: "°",      pct: tiltPct, met: vest.tiltAngle > FALL_THRESHOLDS.tiltAngle, thresh: `Posture › ${FALL_THRESHOLDS.tiltAngle}°` },
-        ].map(({ label, value, unit, pct, met, thresh }) => (
-          <div key={label} className={cn(
-            "rounded-xl border px-3 py-2.5 transition-colors",
-            met ? "border-red-200 bg-red-50" : "border-slate-100 bg-slate-50"
-          )}>
-            <p className={cn("text-xs uppercase tracking-widest mb-0.5", met ? "text-red-400" : "text-slate-400")}>{label}</p>
-            <p className={cn("text-lg font-bold tabular-nums leading-tight", met ? "text-red-600" : "text-slate-800")}>
-              {value}<span className="text-xs font-normal ml-0.5 text-slate-400">{unit}</span>
-            </p>
-            {/* Progress bar */}
-            <div className="mt-2 h-1.5 rounded-full bg-slate-200 overflow-hidden">
-              <div
-                className={cn("h-full rounded-full transition-all duration-300", barColor(pct, met))}
-                style={{ width: `${pct.toFixed(1)}%` }}
-              />
-            </div>
-            <p className="text-slate-300 text-xs mt-1">{thresh}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* ── Threshold indicator pills ── */}
-      <div className="flex gap-2 mb-4">
-        {[
-          { id: "FT1", label: "Velocity",     met: vest.ft1Met },
-          { id: "FT2", label: "Acceleration", met: vest.ft2Met },
-          { id: "FT3", label: "Trunk angle",  met: vest.ft3Met },
-        ].map(({ id, label, met }) => (
-          <div key={id} className={cn(
-            "flex-1 flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 transition-colors",
-            met ? "border-red-200 bg-red-50" : "border-slate-200 bg-slate-50"
-          )}>
-            <span className={cn("h-2 w-2 rounded-full shrink-0 transition-colors", met ? "bg-red-500 animate-pulse" : "bg-slate-300")} />
-            <div className="min-w-0">
-              <p className={cn("text-xs font-semibold leading-none", met ? "text-red-700" : "text-slate-500")}>{id}</p>
-              <p className="text-slate-400 text-xs leading-none mt-0.5">{label}</p>
-            </div>
-            {met && <MdOutlineWarningAmber className="text-red-500 text-sm ml-auto shrink-0" />}
-          </div>
-        ))}
       </div>
 
       {/* ── Countdown / Confirmed alert ── */}
@@ -496,7 +396,7 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
                   <MdOutlineSos className="text-base" /> FALL CONFIRMED
                 </p>
                 <p className="text-red-600 text-xs mt-0.5">
-                  Body remained fallen for {FALL_THRESHOLDS.confirmSeconds}s — emergency alert sent.
+                  Body remained fallen for {FALL_CONFIRM_SECONDS}s — emergency alert sent.
                 </p>
               </>
             ) : (
@@ -505,7 +405,7 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
                   Confirming fall…
                 </p>
                 <p className="text-amber-600 text-xs mt-0.5">
-                  All 3 thresholds exceeded · verifying body orientation stays fallen
+                  Fall signal received from ESP32 · verifying sustained position
                 </p>
                 <p className="text-amber-700 text-xs font-semibold mt-1">
                   Alert in {secondsLeft}s
@@ -521,7 +421,7 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
         <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
           <p className="text-emerald-700 text-xs font-medium">
-            No fall detected — monitoring live gyroscope data
+            No fall detected — monitoring ESP32 fall signal
           </p>
         </div>
       )}
@@ -529,7 +429,7 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
   );
 }
 
-// ─── Sub-components (unchanged from original) ─────────────────────────────────
+// ─── Sub-components ───────────────────────────────────────────────────────────
 
 function StatCard({ label, value, icon: Icon, iconColor, iconBg, valueColor, borderColor }: {
   label: string; value: number | string; icon: React.ElementType;
@@ -626,7 +526,7 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-5xl w-full bg-white rounded-2xl p-0 overflow-hidden">
+      <DialogContent className="max-w-4xl w-full bg-white rounded-2xl p-0 overflow-hidden">
         <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
@@ -662,8 +562,7 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                   {[
                     "Timestamp", "Status",
                     "Temp (°C)", "Humidity (%)", "Dust (%)", "AQI (%)", "CO Gas (%)",
-                    "Ang. Vel.", "Ang. Acc.", "Trunk Ang.", "Tilt Ang.",
-                    "IsZoneA", "IsZoneB",
+                    "Fall", "IsZoneA", "IsZoneB",
                   ].map((h) => (
                     <TableHead key={h} className="text-slate-500 text-xs uppercase tracking-wider font-semibold whitespace-nowrap">{h}</TableHead>
                   ))}
@@ -671,11 +570,8 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
               </TableHeader>
               <TableBody>
                 {logs.map((entry, i) => {
-                  const sc = statusConfig[entry.status as Vest["status"]] ?? statusConfig.online;
-                  const av = entry.angularVelocity     ?? 0;
-                  const aa = entry.angularAcceleration ?? 0;
-                  const ta = entry.trunkAngle          ?? 0;
-                  const ti = entry.tiltAngle           ?? 0;
+                  const sc   = statusConfig[entry.status as Vest["status"]] ?? statusConfig.online;
+                  const fell = entry.fallDetected ?? false;
                   return (
                     <TableRow key={i} className="border-slate-100 hover:bg-slate-50 transition-colors">
                       <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{entry.timestamp.replace("T", " ").slice(0, 19)}</TableCell>
@@ -689,11 +585,18 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
-                      {/* Gyroscope columns */}
-                      <TableCell className={cn("font-mono text-sm font-semibold", av > FALL_THRESHOLDS.angularVelocity     ? "text-red-500" : "text-slate-600")}>{av.toFixed(2)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", aa > FALL_THRESHOLDS.angularAcceleration ? "text-red-500" : "text-slate-600")}>{aa.toFixed(3)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", ta > FALL_THRESHOLDS.trunkAngle          ? "text-red-500" : "text-slate-600")}>{ta.toFixed(2)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", ti > FALL_THRESHOLDS.tiltAngle           ? "text-red-500" : "text-slate-600")}>{ti.toFixed(1)}°</TableCell>
+                      {/* Fall column — simple true/false from ESP32 */}
+                      <TableCell>
+                        {fell ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700">
+                            <MdOutlineSos className="text-sm" /> Yes
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> No
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell><ZoneBadge active={entry.zoneA} /></TableCell>
                       <TableCell><ZoneBadge active={entry.zoneB} /></TableCell>
                     </TableRow>
@@ -782,39 +685,19 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             </div>
           </DialogHeader>
 
-          {/* Live sensor strip — now includes gyroscope */}
+          {/* Live sensor strip — env sensors only */}
           {liveVest && (
             <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-5 gap-3">
               {([
-                { label: "Temp",          value: `${liveVest.temp.toFixed(1)} °C`,                warn: liveVest.temp  > THRESHOLDS.temp },
-                { label: "Humidity",      value: `${liveVest.humidity.toFixed(1)} %`,             warn: false },
-                { label: "Dust",          value: `${liveVest.dust.toFixed(1)} %`,                 warn: liveVest.dust  > THRESHOLDS.dust },
-                { label: "AQI",           value: `${liveVest.aqi.toFixed(1)} %`,                  warn: liveVest.aqi   > THRESHOLDS.aqi },
-                { label: "CO Gas",        value: `${liveVest.coGas.toFixed(1)} %`,                warn: liveVest.coGas > THRESHOLDS.coGas },
+                { label: "Temp",     value: `${liveVest.temp.toFixed(1)} °C`,      warn: liveVest.temp  > THRESHOLDS.temp },
+                { label: "Humidity", value: `${liveVest.humidity.toFixed(1)} %`,   warn: false },
+                { label: "Dust",     value: `${liveVest.dust.toFixed(1)} %`,       warn: liveVest.dust  > THRESHOLDS.dust },
+                { label: "AQI",      value: `${liveVest.aqi.toFixed(1)} %`,        warn: liveVest.aqi   > THRESHOLDS.aqi },
+                { label: "CO Gas",   value: `${liveVest.coGas.toFixed(1)} %`,      warn: liveVest.coGas > THRESHOLDS.coGas },
               ] as const).map(({ label, value, warn }) => (
                 <div key={label} className={cn("rounded-xl border px-3 py-2 text-center", warn ? "border-red-100 bg-red-50" : "border-slate-100 bg-slate-50")}>
                   <p className={cn("text-xs uppercase tracking-widest mb-0.5", warn ? "text-red-400" : "text-slate-400")}>{label}</p>
                   <p className={cn("text-sm font-bold tabular-nums", warn ? "text-red-600" : "text-slate-800")}>{value}</p>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Gyro mini strip inside modal */}
-          {liveVest && (
-            <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-4 gap-3">
-              {[
-                { label: "Ang. Velocity",  value: `${liveVest.angularVelocity.toFixed(2)} rad/s`,   warn: liveVest.ft1Met },
-                { label: "Ang. Accel.",    value: `${liveVest.angularAcceleration.toFixed(3)} r/s²`, warn: liveVest.ft2Met },
-                { label: "Trunk Angle",    value: `${liveVest.trunkAngle.toFixed(2)} rad`,           warn: liveVest.ft3Met },
-                { label: "Tilt Angle",     value: `${liveVest.tiltAngle.toFixed(1)}°`,               warn: liveVest.tiltAngle > FALL_THRESHOLDS.tiltAngle },
-              ].map(({ label, value, warn }) => (
-                <div key={label} className={cn("rounded-xl border px-3 py-2 text-center flex items-center gap-2", warn ? "border-red-100 bg-red-50" : "border-slate-100 bg-slate-50")}>
-                  <TbRotate className={cn("text-sm shrink-0", warn ? "text-red-500" : "text-slate-400")} />
-                  <div>
-                    <p className={cn("text-xs uppercase tracking-widest", warn ? "text-red-400" : "text-slate-400")}>{label}</p>
-                    <p className={cn("text-sm font-bold tabular-nums", warn ? "text-red-600" : "text-slate-800")}>{value}</p>
-                  </div>
                 </div>
               ))}
             </div>
@@ -1098,7 +981,7 @@ export default function SaVestDashboard() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [selectedVest, setSelectedVest] = useState<VestKey>("vest1");
 
-  const [activeUserMap, setActiveUserMap]     = useState<Record<string, PersonnelRecord | null>>({});
+  const [activeUserMap, setActiveUserMap]       = useState<Record<string, PersonnelRecord | null>>({});
   const [personnelLoading, setPersonnelLoading] = useState(false);
   const [historyModalVest, setHistoryModalVest] = useState<string | null>(null);
 
@@ -1108,9 +991,9 @@ export default function SaVestDashboard() {
    * We force a re-render via a lightweight counter when any state changes.
    */
   const fallStateRef = useRef<Record<string, VestFallState>>(
-    Object.fromEntries(VEST_KEYS.map((k) => [k, { inCountdown: false, confirmed: false, secondsLeft: FALL_THRESHOLDS.confirmSeconds, intervalId: null }]))
+    Object.fromEntries(VEST_KEYS.map((k) => [k, { inCountdown: false, confirmed: false, secondsLeft: FALL_CONFIRM_SECONDS, intervalId: null }]))
   );
-  const [fallTick, setFallTick] = useState(0); // increment to force re-render
+  const [fallTick, setFallTick] = useState(0);
   const forceFallRender = useCallback(() => setFallTick((n) => n + 1), []);
 
   // Track last alert type per vest to avoid spamming Firebase
@@ -1119,10 +1002,10 @@ export default function SaVestDashboard() {
   // ── Fall countdown logic ──────────────────────────────────────────────────
   function startFallCountdown(vestKey: string) {
     const fs = fallStateRef.current[vestKey];
-    if (fs.inCountdown || fs.confirmed) return; // already running
+    if (fs.inCountdown || fs.confirmed) return;
 
-    fs.inCountdown  = true;
-    fs.secondsLeft  = FALL_THRESHOLDS.confirmSeconds;
+    fs.inCountdown = true;
+    fs.secondsLeft = FALL_CONFIRM_SECONDS;
     forceFallRender();
 
     const id = setInterval(() => {
@@ -1147,7 +1030,7 @@ export default function SaVestDashboard() {
     if (fs.intervalId) { clearInterval(fs.intervalId); fs.intervalId = null; }
     if (fs.inCountdown) {
       fs.inCountdown = false;
-      fs.secondsLeft = FALL_THRESHOLDS.confirmSeconds;
+      fs.secondsLeft = FALL_CONFIRM_SECONDS;
       forceFallRender();
     }
   }
@@ -1157,7 +1040,7 @@ export default function SaVestDashboard() {
     if (fs.intervalId) { clearInterval(fs.intervalId); fs.intervalId = null; }
     fs.inCountdown = false;
     fs.confirmed   = false;
-    fs.secondsLeft = FALL_THRESHOLDS.confirmSeconds;
+    fs.secondsLeft = FALL_CONFIRM_SECONDS;
     forceFallRender();
   }
 
@@ -1206,8 +1089,7 @@ export default function SaVestDashboard() {
               id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
               status: "offline", zoneA: false, zoneB: false,
               temp: 0, humidity: 0, dust: 0, aqi: 0, coGas: 0,
-              angularVelocity: 0, angularAcceleration: 0, trunkAngle: 0, tiltAngle: 0,
-              ft1Met: false, ft2Met: false, ft3Met: false, allFallThresholdsMet: false,
+              fallDetected: false,
             };
             idx >= 0 ? (updated[idx] = offline) : updated.splice(index, 0, offline);
             return updated;
@@ -1216,11 +1098,11 @@ export default function SaVestDashboard() {
           const sensors = parseVestData(raw);
           const fs      = fallStateRef.current[vestKey];
 
-          // Drive the countdown based on whether all 3 fall thresholds are met
-          if (sensors.allFallThresholdsMet && !fs.confirmed) {
+          // Drive the countdown based on the ESP32 fallDetected boolean
+          if (sensors.fallDetected && !fs.confirmed) {
             startFallCountdown(vestKey);
-          } else if (!sensors.allFallThresholdsMet && fs.inCountdown) {
-            // Thresholds no longer met — person recovered before countdown ended
+          } else if (!sensors.fallDetected && fs.inCountdown) {
+            // ESP32 cleared the fall signal before countdown ended
             cancelFallCountdown(vestKey);
           }
 
@@ -1230,32 +1112,22 @@ export default function SaVestDashboard() {
             status, zoneA: sensors.zoneA, zoneB: sensors.zoneB,
             temp: sensors.temp, humidity: sensors.humidity,
             dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas,
-            angularVelocity:     sensors.angularVelocity,
-            angularAcceleration: sensors.angularAcceleration,
-            trunkAngle:          sensors.trunkAngle,
-            tiltAngle:           sensors.tiltAngle,
-            ft1Met:              sensors.ft1Met,
-            ft2Met:              sensors.ft2Met,
-            ft3Met:              sensors.ft3Met,
-            allFallThresholdsMet: sensors.allFallThresholdsMet,
+            fallDetected: sensors.fallDetected,
           };
           idx >= 0 ? (updated[idx] = record) : updated.splice(index, 0, record);
 
-          // Persist to Firestore (includes gyro values)
+          // Persist to Firestore
           saveEventLog(vestKey, {
-            timestamp:           new Date().toISOString(),
-            temp:                sensors.temp,
-            humidity:            sensors.humidity,
-            dust:                sensors.dust,
-            aqi:                 sensors.aqi,
-            coGas:               sensors.coGas,
+            timestamp:    new Date().toISOString(),
+            temp:         sensors.temp,
+            humidity:     sensors.humidity,
+            dust:         sensors.dust,
+            aqi:          sensors.aqi,
+            coGas:        sensors.coGas,
             status,
-            zoneA:               sensors.zoneA,
-            zoneB:               sensors.zoneB,
-            angularVelocity:     sensors.angularVelocity,
-            angularAcceleration: sensors.angularAcceleration,
-            trunkAngle:          sensors.trunkAngle,
-            tiltAngle:           sensors.tiltAngle,
+            zoneA:        sensors.zoneA,
+            zoneB:        sensors.zoneB,
+            fallDetected: sensors.fallDetected,
           });
 
           // Push alert
@@ -1415,10 +1287,10 @@ export default function SaVestDashboard() {
           {/* Env sensor cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
             {([
-              { label: "Dust",   value: (activeVest?.dust  ?? 0).toFixed(1), unit: "%",  Icon: TbWind,           warn: (activeVest?.dust  ?? 0) > THRESHOLDS.dust },
-              { label: "CO Gas", value: (activeVest?.coGas ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,        warn: (activeVest?.coGas ?? 0) > THRESHOLDS.coGas },
-              { label: "AQI",    value: (activeVest?.aqi   ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,        warn: (activeVest?.aqi   ?? 0) > THRESHOLDS.aqi },
-              { label: "Temp",   value: (activeVest?.temp  ?? 0).toFixed(1), unit: "°C", Icon: BsThermometerHalf,warn: (activeVest?.temp  ?? 0) > THRESHOLDS.temp },
+              { label: "Dust",   value: (activeVest?.dust  ?? 0).toFixed(1), unit: "%",  Icon: TbWind,            warn: (activeVest?.dust  ?? 0) > THRESHOLDS.dust },
+              { label: "CO Gas", value: (activeVest?.coGas ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,         warn: (activeVest?.coGas ?? 0) > THRESHOLDS.coGas },
+              { label: "AQI",    value: (activeVest?.aqi   ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,         warn: (activeVest?.aqi   ?? 0) > THRESHOLDS.aqi },
+              { label: "Temp",   value: (activeVest?.temp  ?? 0).toFixed(1), unit: "°C", Icon: BsThermometerHalf, warn: (activeVest?.temp  ?? 0) > THRESHOLDS.temp },
             ] as const).map(({ label, value, unit, Icon, warn }) => (
               <div key={label} className={cn("rounded-xl border px-4 py-3 flex items-center gap-3 transition-colors", warn ? "border-red-200 bg-red-50" : "border-slate-100 bg-slate-50")}>
                 <Icon className={cn("text-lg shrink-0", warn ? "text-red-500" : "text-slate-400")} />
@@ -1433,7 +1305,7 @@ export default function SaVestDashboard() {
             ))}
           </div>
 
-          {/* ── FALL DETECTION PANEL (live data, no simulate buttons) ── */}
+          {/* ── FALL DETECTION PANEL ── */}
           <FallDetectionPanel
             vest={activeVest}
             fallState={fallStateRef.current[selectedVest]}
@@ -1443,11 +1315,11 @@ export default function SaVestDashboard() {
 
         {/* ── STAT CARDS ── */}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
-          <StatCard label="Total Vests" value={totalVests}  icon={TbShirt}              iconColor="text-blue-600"    iconBg="bg-blue-50"    valueColor="text-blue-600"    borderColor="border-blue-100"    />
-          <StatCard label="Online"      value={onlineCount} icon={HiOutlineStatusOnline} iconColor="text-emerald-600" iconBg="bg-emerald-50" valueColor="text-emerald-600" borderColor="border-emerald-100" />
-          <StatCard label="Alerts"      value={alertCount}  icon={MdOutlineWarningAmber} iconColor="text-amber-600"  iconBg="bg-amber-50"   valueColor="text-amber-600"   borderColor="border-amber-100"   />
-          <StatCard label="Need Rescue" value={rescueCount} icon={MdOutlineSos}          iconColor="text-red-600"    iconBg="bg-red-50"     valueColor="text-red-600"     borderColor="border-red-100"     />
-          <StatCard label="Fall Alerts" value={fallCount}   icon={TbRotate }           iconColor="text-red-700"    iconBg="bg-red-100"    valueColor="text-red-700"     borderColor="border-red-200"     />
+          <StatCard label="Total Vests" value={totalVests}  icon={TbShirt}               iconColor="text-blue-600"    iconBg="bg-blue-50"    valueColor="text-blue-600"    borderColor="border-blue-100"    />
+          <StatCard label="Online"      value={onlineCount} icon={HiOutlineStatusOnline}  iconColor="text-emerald-600" iconBg="bg-emerald-50" valueColor="text-emerald-600" borderColor="border-emerald-100" />
+          <StatCard label="Alerts"      value={alertCount}  icon={MdOutlineWarningAmber}  iconColor="text-amber-600"  iconBg="bg-amber-50"   valueColor="text-amber-600"   borderColor="border-amber-100"   />
+          <StatCard label="Need Rescue" value={rescueCount} icon={MdOutlineSos}           iconColor="text-red-600"    iconBg="bg-red-50"     valueColor="text-red-600"     borderColor="border-red-100"     />
+          <StatCard label="Fall Alerts" value={fallCount}   icon={TbRotate}               iconColor="text-red-700"    iconBg="bg-red-100"    valueColor="text-red-700"     borderColor="border-red-200"     />
         </div>
 
         {/* ── REGISTER NEW DEVICE ── */}
@@ -1599,7 +1471,7 @@ export default function SaVestDashboard() {
                           </span>
                         </TableCell>
 
-                        {/* Fall Status — per-vest gyroscope indicator */}
+                        {/* Fall Status — driven by ESP32 fallDetected signal */}
                         <TableCell>
                           {vestFall?.confirmed ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">
@@ -1610,7 +1482,7 @@ export default function SaVestDashboard() {
                               <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
                               {vestFall.secondsLeft}s…
                             </span>
-                          ) : vest.allFallThresholdsMet ? (
+                          ) : vest.fallDetected ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
                               <MdOutlineWarningAmber className="text-sm" /> Triggered
                             </span>

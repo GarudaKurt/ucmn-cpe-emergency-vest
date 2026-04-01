@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +48,7 @@ import { BsThermometerHalf, BsDroplet } from "react-icons/bs";
 import { GiGasMask } from "react-icons/gi";
 import { LuAlarmClock } from "react-icons/lu";
 import { HiOutlineStatusOnline } from "react-icons/hi";
+import { TbRotate } from "react-icons/tb";
 
 // Firebase Realtime DB
 import { database, firestore } from "../config/firebase";
@@ -61,29 +62,66 @@ import {
   updateDoc, Timestamp,
 } from "firebase/firestore";
 
+
+// ─── Fall Detection Thresholds ────────────────────────────────────────────────
+// Based on Bourke et al. (2007) bi-axial gyroscope study
+const FALL_THRESHOLDS = {
+  angularVelocity:     3.1,   // rad/s   — FT1
+  angularAcceleration: 0.05,  // rad/s²  — FT2
+  trunkAngle:          0.59,  // rad     — FT3
+  tiltAngle:           60,    // degrees — posture confirmation
+  confirmSeconds:      9,     // seconds — sustained fallen orientation
+};
+
+// ─── Circumference for the SVG countdown ring (r = 38) ───────────────────────
+const RING_CIRC = 2 * Math.PI * 38; // ≈ 238.76
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface RawVestData {
-  dht22:  string | number;
-  dust:   string | number;
-  mq135:  string | number;
-  mq9:    string | number;
-  zoneA:  boolean;
-  zoneB:  boolean;
+  dht22:               string | number;
+  dust:                string | number;
+  mq135:               string | number;
+  mq9:                 string | number;
+  zoneA:               boolean;
+  zoneB:               boolean;
+  // Gyroscope fields sent by ESP32 (all in same Firebase node)
+  angularVelocity?:     string | number;
+  angularAcceleration?: string | number;
+  trunkAngle?:          string | number;
+  tiltAngle?:           string | number;
 }
 
 interface Vest {
-  id:       string;
-  name:     string;
-  rfidTag:  string;
-  status:   "online" | "offline" | "alert" | "rescue";
-  zoneA:    boolean;
-  zoneB:    boolean;
-  temp:     number;
-  humidity: number;
-  dust:     number;
-  aqi:      number;
-  coGas:    number;
+  id:                  string;
+  name:                string;
+  rfidTag:             string;
+  status:              "online" | "offline" | "alert" | "rescue" | "fall";
+  zoneA:               boolean;
+  zoneB:               boolean;
+  temp:                number;
+  humidity:            number;
+  dust:                number;
+  aqi:                 number;
+  coGas:               number;
+  // Gyroscope readings
+  angularVelocity:     number;
+  angularAcceleration: number;
+  trunkAngle:          number;
+  tiltAngle:           number;
+  // Derived threshold flags
+  ft1Met:              boolean;
+  ft2Met:              boolean;
+  ft3Met:              boolean;
+  allFallThresholdsMet: boolean;
+}
+
+// Per-vest fall state managed via refs (avoids re-render storms from timers)
+interface VestFallState {
+  inCountdown:    boolean;
+  confirmed:      boolean;
+  secondsLeft:    number;
+  intervalId:     ReturnType<typeof setInterval> | null;
 }
 
 interface AlertLog {
@@ -100,23 +138,21 @@ interface AlertLog {
 }
 
 interface EventLogEntry {
-  timestamp: string;
-  temp:      number;
-  humidity:  number;
-  dust:      number;
-  aqi:       number;
-  coGas:     number;
-  status:    string;
-  zoneA:     boolean;
-  zoneB:     boolean;
+  timestamp:           string;
+  temp:                number;
+  humidity:            number;
+  dust:                number;
+  aqi:                 number;
+  coGas:               number;
+  status:              string;
+  zoneA:               boolean;
+  zoneB:               boolean;
+  angularVelocity:     number;
+  angularAcceleration: number;
+  trunkAngle:          number;
+  tiltAngle:           number;
 }
 
-/**
- * One personnel assignment stored in Firestore `registeredPersonnel`.
- * Each time someone is assigned a vest, a NEW document is created.
- * isReturned = false  → currently in use
- * isReturned = true   → vest has been handed back
- */
 interface PersonnelRecord {
   docId:        string;
   name:         string;
@@ -137,7 +173,6 @@ interface RegisterForm {
 
 const FORM_EMPTY: RegisterForm = { name: "", age: "", department: "", assignedVest: "" };
 
-
 const VEST_KEYS = ["vest1", "vest2"] as const;
 type VestKey = typeof VEST_KEYS[number];
 
@@ -151,12 +186,23 @@ const DEPARTMENTS = [
   "Safety & Compliance", "Logistics", "Management",
 ];
 
-const THRESHOLDS = { dust: 50, coGas: 1.0, aqi: 150, temp: 37.0 };
+const THRESHOLDS = { dust: 70, coGas: 70, aqi: 70, temp: 37.0 };
 
+// ─── Data Helpers ─────────────────────────────────────────────────────────────
 
 function parseVestData(raw: RawVestData) {
   const dhtRaw   = String(raw.dht22);
   const dhtParts = dhtRaw.includes(";") ? dhtRaw.split(";") : [dhtRaw, "0"];
+
+  const angularVelocity     = Number(raw.angularVelocity)     || 0;
+  const angularAcceleration = Number(raw.angularAcceleration) || 0;
+  const trunkAngle          = Number(raw.trunkAngle)          || 0;
+  const tiltAngle           = Number(raw.tiltAngle)           || 0;
+
+  const ft1Met = angularVelocity     > FALL_THRESHOLDS.angularVelocity;
+  const ft2Met = angularAcceleration > FALL_THRESHOLDS.angularAcceleration;
+  const ft3Met = trunkAngle          > FALL_THRESHOLDS.trunkAngle;
+
   return {
     temp:     Number(dhtParts[0]) || 0,
     humidity: Number(dhtParts[1]) || 0,
@@ -165,18 +211,28 @@ function parseVestData(raw: RawVestData) {
     coGas:    Number(raw.mq9)     || 0,
     zoneA:    Boolean(raw.zoneA),
     zoneB:    Boolean(raw.zoneB),
+    angularVelocity,
+    angularAcceleration,
+    trunkAngle,
+    tiltAngle,
+    ft1Met,
+    ft2Met,
+    ft3Met,
+    allFallThresholdsMet: ft1Met && ft2Met && ft3Met,
   };
 }
 
-function deriveStatus(s: ReturnType<typeof parseVestData>): Vest["status"] {
-  if (s.temp > THRESHOLDS.temp) return "rescue";
-  if (s.dust > THRESHOLDS.dust || s.coGas > THRESHOLDS.coGas || s.aqi > THRESHOLDS.aqi) return "alert";
+function deriveStatus(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean): Vest["status"] {
+  if (fallConfirmed)                                                          return "fall";
+  if (s.temp  > THRESHOLDS.temp)                                              return "rescue";
+  if (s.dust  > THRESHOLDS.dust || s.coGas > THRESHOLDS.coGas || s.aqi > THRESHOLDS.aqi) return "alert";
   return "online";
 }
 
-function deriveAlertType(s: ReturnType<typeof parseVestData>): string | null {
-  if (s.temp  > THRESHOLDS.temp)  return "Need Rescue";
-  if (s.dust  > THRESHOLDS.dust)  return "High Dust";
+function deriveAlertType(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean): string | null {
+  if (fallConfirmed)             return "Fall Detected";
+  if (s.temp  > THRESHOLDS.temp) return "Need Rescue";
+  if (s.dust  > THRESHOLDS.dust) return "High Dust";
   if (s.coGas > THRESHOLDS.coGas) return "High CO Gas";
   if (s.aqi   > THRESHOLDS.aqi)   return "High AQI";
   return null;
@@ -201,7 +257,6 @@ async function fetchVestPersonnel(vestId: string): Promise<PersonnelRecord[]> {
     const q    = query(collection(firestore, "registeredPersonnel"), where("assignedVest", "==", vestId));
     const snap = await getDocs(q);
     const docs = snap.docs.map((d) => ({ docId: d.id, ...(d.data() as Omit<PersonnelRecord, "docId">) }));
-
     return docs.sort((a, b) => {
       const at = a.registeredAt?.toMillis() ?? 0;
       const bt = b.registeredAt?.toMillis() ?? 0;
@@ -220,7 +275,6 @@ async function fetchEventLogs(vestId: string): Promise<EventLogEntry[]> {
 
 async function fetchActiveUser(vestId: string): Promise<PersonnelRecord | null> {
   try {
-
     const q    = query(collection(firestore, "registeredPersonnel"), where("assignedVest", "==", vestId));
     const snap = await getDocs(q);
     if (snap.empty) return null;
@@ -239,28 +293,21 @@ async function markVestReturned(docId: string): Promise<void> {
   });
 }
 
-/**
- * Fetch all unique people who have ever been registered in `registeredPersonnel`.
- * De-duplicated by name+department, keeping the most recent record per person.
- * This powers the Registered Users table.
- */
 interface UniqueUser {
-  key:          string;           // name|department
+  key:          string;
   name:         string;
   department:   string;
   age:          number;
-  latestRecord: PersonnelRecord;  // most recent assignment (any vest, any state)
+  latestRecord: PersonnelRecord;
 }
 
 async function fetchUniqueUsers(): Promise<UniqueUser[]> {
   try {
-    const snap = await getDocs(collection(firestore, "registeredPersonnel"));
+    const snap    = await getDocs(collection(firestore, "registeredPersonnel"));
     const allDocs = snap.docs.map((d) => ({ docId: d.id, ...(d.data() as Omit<PersonnelRecord, "docId">) }));
-
-    // Group by name+department, keep newest record per person
-    const map = new Map<string, UniqueUser>();
+    const map     = new Map<string, UniqueUser>();
     for (const record of allDocs) {
-      const key = `${record.name}|${record.department}`;
+      const key      = `${record.name}|${record.department}`;
       const existing = map.get(key);
       const recordMs = record.registeredAt?.toMillis() ?? 0;
       const existMs  = existing?.latestRecord.registeredAt?.toMillis() ?? -1;
@@ -268,13 +315,10 @@ async function fetchUniqueUsers(): Promise<UniqueUser[]> {
         map.set(key, { key, name: record.name, department: record.department, age: record.age, latestRecord: record });
       }
     }
-
-    // Sort alphabetically by name
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
   } catch (err) { console.error("fetchUniqueUsers error:", err); return []; }
 }
 
-/** Assign an existing person to a vest by creating a new registeredPersonnel doc */
 async function assignUserToVest(user: UniqueUser, vestId: string): Promise<void> {
   await addDoc(collection(firestore, "registeredPersonnel"), {
     name:         user.name,
@@ -290,15 +334,202 @@ async function assignUserToVest(user: UniqueUser, vestId: string): Promise<void>
 // ─── Status Config ────────────────────────────────────────────────────────────
 
 const statusConfig: Record<Vest["status"], { label: string; className: string; dot: string }> = {
-  online:  { label: "Online",      className: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500" },
-  offline: { label: "Offline",     className: "border-slate-200 bg-slate-50 text-slate-500",       dot: "bg-slate-400" },
-  alert:   { label: "Alert",       className: "border-amber-200 bg-amber-50 text-amber-700",       dot: "bg-amber-500 animate-pulse" },
-  rescue:  { label: "Need Rescue", className: "border-red-200 bg-red-50 text-red-700",             dot: "bg-red-500 animate-pulse" },
+  online:  { label: "Online",       className: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500" },
+  offline: { label: "Offline",      className: "border-slate-200 bg-slate-50 text-slate-500",       dot: "bg-slate-400" },
+  alert:   { label: "Alert",        className: "border-amber-200 bg-amber-50 text-amber-700",       dot: "bg-amber-500 animate-pulse" },
+  rescue:  { label: "Need Rescue",  className: "border-red-200 bg-red-50 text-red-700",             dot: "bg-red-500 animate-pulse" },
+  fall:    { label: "Fall Detected",className: "border-red-300 bg-red-100 text-red-800",            dot: "bg-red-600 animate-ping" },
 };
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── Fall Detection Panel ─────────────────────────────────────────────────────
+// Displays live gyroscope readings, threshold indicators, countdown ring,
+// and confirmed-fall alert for the currently selected vest.
 
+interface FallPanelProps {
+  vest:          Vest | undefined;
+  fallState:     VestFallState;
+  onResetFall:   () => void;
+}
 
+function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
+  if (!vest) return null;
+
+  const { inCountdown, confirmed, secondsLeft } = fallState;
+  const ringOffset = confirmed
+    ? 0
+    : inCountdown
+      ? RING_CIRC * (1 - secondsLeft / FALL_THRESHOLDS.confirmSeconds)
+      : RING_CIRC;
+
+  // Bar percentage helpers
+  const velPct  = Math.min((vest.angularVelocity     / (FALL_THRESHOLDS.angularVelocity * 2))     * 100, 100);
+  const accPct  = Math.min((vest.angularAcceleration / (FALL_THRESHOLDS.angularAcceleration * 4)) * 100, 100);
+  const angPct  = Math.min((vest.trunkAngle          / (FALL_THRESHOLDS.trunkAngle * 2))          * 100, 100);
+  const tiltPct = Math.min((vest.tiltAngle           / 90)                                        * 100, 100);
+
+  function barColor(pct: number, met: boolean) {
+    if (met)        return "bg-red-500";
+    if (pct > 60)   return "bg-amber-400";
+    return "bg-blue-400";
+  }
+
+  return (
+    <div className={cn(
+      "rounded-2xl border p-5 transition-all duration-500",
+      confirmed
+        ? "border-red-300 bg-red-50 shadow-md shadow-red-100"
+        : inCountdown
+          ? "border-amber-200 bg-amber-50"
+          : "border-slate-200 bg-white shadow-sm"
+    )}>
+
+      {/* Panel header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <div className={cn(
+            "h-8 w-8 rounded-lg flex items-center justify-center",
+            confirmed ? "bg-red-100" : "bg-slate-100"
+          )}>
+            <TbRotate  className={cn("text-lg", confirmed ? "text-red-600 animate-spin" : "text-slate-500")} />
+          </div>
+          <div>
+            <p className="text-slate-800 text-sm font-semibold leading-tight">Fall Detection</p>
+            <p className="text-slate-400 text-xs">{vest.id} · gyroscope monitor</p>
+          </div>
+        </div>
+        {confirmed && (
+          <Button
+            size="sm"
+            onClick={onResetFall}
+            className="rounded-lg text-xs h-7 px-3 gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
+          >
+            <FiRotateCcw className="text-xs" /> Reset
+          </Button>
+        )}
+      </div>
+
+      {/* ── Gyroscope metric bars ── */}
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        {[
+          { label: "Angular velocity", value: vest.angularVelocity.toFixed(2),     unit: "rad/s",  pct: velPct,  met: vest.ft1Met, thresh: `FT1 › ${FALL_THRESHOLDS.angularVelocity}` },
+          { label: "Angular accel.",   value: vest.angularAcceleration.toFixed(3), unit: "rad/s²", pct: accPct,  met: vest.ft2Met, thresh: `FT2 › ${FALL_THRESHOLDS.angularAcceleration}` },
+          { label: "Trunk angle",      value: vest.trunkAngle.toFixed(2),          unit: "rad",    pct: angPct,  met: vest.ft3Met, thresh: `FT3 › ${FALL_THRESHOLDS.trunkAngle}` },
+          { label: "Tilt angle",       value: vest.tiltAngle.toFixed(1),           unit: "°",      pct: tiltPct, met: vest.tiltAngle > FALL_THRESHOLDS.tiltAngle, thresh: `Posture › ${FALL_THRESHOLDS.tiltAngle}°` },
+        ].map(({ label, value, unit, pct, met, thresh }) => (
+          <div key={label} className={cn(
+            "rounded-xl border px-3 py-2.5 transition-colors",
+            met ? "border-red-200 bg-red-50" : "border-slate-100 bg-slate-50"
+          )}>
+            <p className={cn("text-xs uppercase tracking-widest mb-0.5", met ? "text-red-400" : "text-slate-400")}>{label}</p>
+            <p className={cn("text-lg font-bold tabular-nums leading-tight", met ? "text-red-600" : "text-slate-800")}>
+              {value}<span className="text-xs font-normal ml-0.5 text-slate-400">{unit}</span>
+            </p>
+            {/* Progress bar */}
+            <div className="mt-2 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+              <div
+                className={cn("h-full rounded-full transition-all duration-300", barColor(pct, met))}
+                style={{ width: `${pct.toFixed(1)}%` }}
+              />
+            </div>
+            <p className="text-slate-300 text-xs mt-1">{thresh}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Threshold indicator pills ── */}
+      <div className="flex gap-2 mb-4">
+        {[
+          { id: "FT1", label: "Velocity",     met: vest.ft1Met },
+          { id: "FT2", label: "Acceleration", met: vest.ft2Met },
+          { id: "FT3", label: "Trunk angle",  met: vest.ft3Met },
+        ].map(({ id, label, met }) => (
+          <div key={id} className={cn(
+            "flex-1 flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 transition-colors",
+            met ? "border-red-200 bg-red-50" : "border-slate-200 bg-slate-50"
+          )}>
+            <span className={cn("h-2 w-2 rounded-full shrink-0 transition-colors", met ? "bg-red-500 animate-pulse" : "bg-slate-300")} />
+            <div className="min-w-0">
+              <p className={cn("text-xs font-semibold leading-none", met ? "text-red-700" : "text-slate-500")}>{id}</p>
+              <p className="text-slate-400 text-xs leading-none mt-0.5">{label}</p>
+            </div>
+            {met && <MdOutlineWarningAmber className="text-red-500 text-sm ml-auto shrink-0" />}
+          </div>
+        ))}
+      </div>
+
+      {/* ── Countdown / Confirmed alert ── */}
+      {(inCountdown || confirmed) && (
+        <div className={cn(
+          "rounded-xl border px-4 py-3 flex items-center gap-4 transition-all",
+          confirmed
+            ? "border-red-300 bg-red-100"
+            : "border-amber-200 bg-amber-50"
+        )}>
+          {/* SVG ring */}
+          <div className="relative shrink-0" style={{ width: 64, height: 64 }}>
+            <svg width="64" height="64" viewBox="0 0 90 90" style={{ transform: "rotate(-90deg)" }}>
+              <circle cx="45" cy="45" r="38" fill="none" stroke={confirmed ? "#fca5a5" : "#fde68a"} strokeWidth="6" />
+              <circle
+                cx="45" cy="45" r="38" fill="none"
+                stroke={confirmed ? "#dc2626" : "#d97706"}
+                strokeWidth="6"
+                strokeDasharray={RING_CIRC}
+                strokeDashoffset={ringOffset}
+                strokeLinecap="round"
+                style={{ transition: "stroke-dashoffset 1s linear" }}
+              />
+            </svg>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className={cn(
+                "text-lg font-bold tabular-nums",
+                confirmed ? "text-red-700" : "text-amber-700"
+              )}>
+                {confirmed ? "!" : secondsLeft}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {confirmed ? (
+              <>
+                <p className="text-red-800 text-sm font-bold leading-tight flex items-center gap-1.5">
+                  <MdOutlineSos className="text-base" /> FALL CONFIRMED
+                </p>
+                <p className="text-red-600 text-xs mt-0.5">
+                  Body remained fallen for {FALL_THRESHOLDS.confirmSeconds}s — emergency alert sent.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-amber-800 text-sm font-semibold leading-tight">
+                  Confirming fall…
+                </p>
+                <p className="text-amber-600 text-xs mt-0.5">
+                  All 3 thresholds exceeded · verifying body orientation stays fallen
+                </p>
+                <p className="text-amber-700 text-xs font-semibold mt-1">
+                  Alert in {secondsLeft}s
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Idle state — all clear ── */}
+      {!inCountdown && !confirmed && (
+        <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
+          <p className="text-emerald-700 text-xs font-medium">
+            No fall detected — monitoring live gyroscope data
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Sub-components (unchanged from original) ─────────────────────────────────
 
 function StatCard({ label, value, icon: Icon, iconColor, iconBg, valueColor, borderColor }: {
   label: string; value: number | string; icon: React.ElementType;
@@ -395,7 +626,7 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-4xl w-full bg-white rounded-2xl p-0 overflow-hidden">
+      <DialogContent className="max-w-5xl w-full bg-white rounded-2xl p-0 overflow-hidden">
         <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
@@ -428,7 +659,12 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
             <Table>
               <TableHeader>
                 <TableRow className="border-slate-100 hover:bg-transparent bg-slate-50">
-                  {["Timestamp", "Status", "Temp (°C)", "Humidity (%)", "Dust (µg/m³)", "AQI", "CO Gas (ppm)", "IsZoneA", "IsZoneB"].map((h) => (
+                  {[
+                    "Timestamp", "Status",
+                    "Temp (°C)", "Humidity (%)", "Dust (%)", "AQI (%)", "CO Gas (%)",
+                    "Ang. Vel.", "Ang. Acc.", "Trunk Ang.", "Tilt Ang.",
+                    "IsZoneA", "IsZoneB",
+                  ].map((h) => (
                     <TableHead key={h} className="text-slate-500 text-xs uppercase tracking-wider font-semibold whitespace-nowrap">{h}</TableHead>
                   ))}
                 </TableRow>
@@ -436,6 +672,10 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
               <TableBody>
                 {logs.map((entry, i) => {
                   const sc = statusConfig[entry.status as Vest["status"]] ?? statusConfig.online;
+                  const av = entry.angularVelocity     ?? 0;
+                  const aa = entry.angularAcceleration ?? 0;
+                  const ta = entry.trunkAngle          ?? 0;
+                  const ti = entry.tiltAngle           ?? 0;
                   return (
                     <TableRow key={i} className="border-slate-100 hover:bg-slate-50 transition-colors">
                       <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{entry.timestamp.replace("T", " ").slice(0, 19)}</TableCell>
@@ -446,9 +686,14 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                       </TableCell>
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500")}>{entry.temp.toFixed(1)}</TableCell>
                       <TableCell className="text-purple-600 font-mono text-sm font-semibold">{entry.humidity.toFixed(1)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(0)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(2)}</TableCell>
+                      <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
+                      <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
+                      <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
+                      {/* Gyroscope columns */}
+                      <TableCell className={cn("font-mono text-sm font-semibold", av > FALL_THRESHOLDS.angularVelocity     ? "text-red-500" : "text-slate-600")}>{av.toFixed(2)}</TableCell>
+                      <TableCell className={cn("font-mono text-sm font-semibold", aa > FALL_THRESHOLDS.angularAcceleration ? "text-red-500" : "text-slate-600")}>{aa.toFixed(3)}</TableCell>
+                      <TableCell className={cn("font-mono text-sm font-semibold", ta > FALL_THRESHOLDS.trunkAngle          ? "text-red-500" : "text-slate-600")}>{ta.toFixed(2)}</TableCell>
+                      <TableCell className={cn("font-mono text-sm font-semibold", ti > FALL_THRESHOLDS.tiltAngle           ? "text-red-500" : "text-slate-600")}>{ti.toFixed(1)}°</TableCell>
                       <TableCell><ZoneBadge active={entry.zoneA} /></TableCell>
                       <TableCell><ZoneBadge active={entry.zoneB} /></TableCell>
                     </TableRow>
@@ -471,9 +716,6 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
 }
 
 // ─── Vest Personnel History Modal ─────────────────────────────────────────────
-// Displays ALL users who have ever used this vest.
-// The "IsReturn" column lets admins mark a vest as returned,
-// which frees it up for the next user to be registered.
 
 function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: {
   open:            boolean;
@@ -482,49 +724,36 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
   liveVest:        Vest | undefined;
   onReturnSuccess: (vestId: string) => void;
 }) {
-  const [records, setRecords]         = useState<PersonnelRecord[]>([]);
-  const [loading, setLoading]         = useState(false);
-  const [returningId, setReturningId] = useState<string | null>(null);
+  const [records, setRecords]             = useState<PersonnelRecord[]>([]);
+  const [loading, setLoading]             = useState(false);
+  const [returningId, setReturningId]     = useState<string | null>(null);
   const [sensorLogOpen, setSensorLogOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
-    fetchVestPersonnel(vestId).then((data) => {
-      setRecords(data);
-      setLoading(false);
-    });
+    fetchVestPersonnel(vestId).then((data) => { setRecords(data); setLoading(false); });
   }, [open, vestId]);
 
   async function handleReturn(record: PersonnelRecord) {
     setReturningId(record.docId);
     try {
       await markVestReturned(record.docId);
-      // Optimistic update — flip isReturned locally
       setRecords((prev) =>
-        prev.map((r) =>
-          r.docId === record.docId
-            ? { ...r, isReturned: true, returnedAt: Timestamp.now() }
-            : r
-        )
+        prev.map((r) => r.docId === record.docId ? { ...r, isReturned: true, returnedAt: Timestamp.now() } : r)
       );
       onReturnSuccess(vestId);
-    } catch (err) {
-      console.error("Return error:", err);
-    } finally {
-      setReturningId(null);
-    }
+    } catch (err) { console.error("Return error:", err); }
+    finally { setReturningId(null); }
   }
 
   const activeUser = records.find((r) => !r.isReturned);
-  const sc = liveVest ? statusConfig[liveVest.status] : statusConfig.offline;
+  const sc         = liveVest ? statusConfig[liveVest.status] : statusConfig.offline;
 
   return (
     <>
       <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
         <DialogContent className="max-w-5xl w-full bg-white rounded-2xl p-0 overflow-hidden">
-
-          {/* ── Modal Header ── */}
           <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
             <div className="flex items-center gap-3">
               <div className="h-10 w-10 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
@@ -538,12 +767,10 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
                   All users assigned to this vest · click <strong>Mark Return</strong> when the vest is handed back
                 </p>
               </div>
-              {/* Live status + sensor log button */}
               <div className="flex items-center gap-2 shrink-0">
                 {liveVest && (
                   <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium", sc.className)}>
-                    <span className={cn("h-1.5 w-1.5 rounded-full", sc.dot)} />
-                    {sc.label}
+                    <span className={cn("h-1.5 w-1.5 rounded-full", sc.dot)} />{sc.label}
                   </span>
                 )}
                 <Button size="sm" variant="outline"
@@ -555,15 +782,15 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             </div>
           </DialogHeader>
 
-          {/* ── Mini live sensor strip ── */}
+          {/* Live sensor strip — now includes gyroscope */}
           {liveVest && (
             <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-5 gap-3">
               {([
-                { label: "Temp",    value: `${liveVest.temp.toFixed(1)} °C`,    warn: liveVest.temp  > THRESHOLDS.temp },
-                { label: "Humidity",value: `${liveVest.humidity.toFixed(1)} %`, warn: false },
-                { label: "Dust",    value: `${liveVest.dust.toFixed(1)} µg/m³`, warn: liveVest.dust  > THRESHOLDS.dust },
-                { label: "AQI",     value: liveVest.aqi.toFixed(0),             warn: liveVest.aqi   > THRESHOLDS.aqi },
-                { label: "CO Gas",  value: `${liveVest.coGas.toFixed(2)} ppm`,  warn: liveVest.coGas > THRESHOLDS.coGas },
+                { label: "Temp",          value: `${liveVest.temp.toFixed(1)} °C`,                warn: liveVest.temp  > THRESHOLDS.temp },
+                { label: "Humidity",      value: `${liveVest.humidity.toFixed(1)} %`,             warn: false },
+                { label: "Dust",          value: `${liveVest.dust.toFixed(1)} %`,                 warn: liveVest.dust  > THRESHOLDS.dust },
+                { label: "AQI",           value: `${liveVest.aqi.toFixed(1)} %`,                  warn: liveVest.aqi   > THRESHOLDS.aqi },
+                { label: "CO Gas",        value: `${liveVest.coGas.toFixed(1)} %`,                warn: liveVest.coGas > THRESHOLDS.coGas },
               ] as const).map(({ label, value, warn }) => (
                 <div key={label} className={cn("rounded-xl border px-3 py-2 text-center", warn ? "border-red-100 bg-red-50" : "border-slate-100 bg-slate-50")}>
                   <p className={cn("text-xs uppercase tracking-widest mb-0.5", warn ? "text-red-400" : "text-slate-400")}>{label}</p>
@@ -573,8 +800,27 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             </div>
           )}
 
-          {/* ── Personnel history table ── */}
-          <div className="overflow-auto max-h-[50vh] px-6 py-4">
+          {/* Gyro mini strip inside modal */}
+          {liveVest && (
+            <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-4 gap-3">
+              {[
+                { label: "Ang. Velocity",  value: `${liveVest.angularVelocity.toFixed(2)} rad/s`,   warn: liveVest.ft1Met },
+                { label: "Ang. Accel.",    value: `${liveVest.angularAcceleration.toFixed(3)} r/s²`, warn: liveVest.ft2Met },
+                { label: "Trunk Angle",    value: `${liveVest.trunkAngle.toFixed(2)} rad`,           warn: liveVest.ft3Met },
+                { label: "Tilt Angle",     value: `${liveVest.tiltAngle.toFixed(1)}°`,               warn: liveVest.tiltAngle > FALL_THRESHOLDS.tiltAngle },
+              ].map(({ label, value, warn }) => (
+                <div key={label} className={cn("rounded-xl border px-3 py-2 text-center flex items-center gap-2", warn ? "border-red-100 bg-red-50" : "border-slate-100 bg-slate-50")}>
+                  <TbRotate className={cn("text-sm shrink-0", warn ? "text-red-500" : "text-slate-400")} />
+                  <div>
+                    <p className={cn("text-xs uppercase tracking-widest", warn ? "text-red-400" : "text-slate-400")}>{label}</p>
+                    <p className={cn("text-sm font-bold tabular-nums", warn ? "text-red-600" : "text-slate-800")}>{value}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="overflow-auto max-h-[45vh] px-6 py-4">
             {loading ? (
               <div className="flex items-center justify-center py-16 gap-2 text-slate-400">
                 <FiLoader className="animate-spin text-lg" />
@@ -601,75 +847,39 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
                     return (
                       <TableRow
                         key={record.docId}
-                        className={cn(
-                          "border-slate-100 transition-colors",
-                          isActive ? "bg-blue-50/60 hover:bg-blue-50" : "hover:bg-slate-50"
-                        )}
+                        className={cn("border-slate-100 transition-colors", isActive ? "bg-blue-50/60 hover:bg-blue-50" : "hover:bg-slate-50")}
                       >
-                        {/* # */}
                         <TableCell className="text-slate-400 text-xs font-mono">{i + 1}</TableCell>
-
-                        {/* Name */}
                         <TableCell>
                           <div className="flex items-center gap-2">
-                            <div className={cn(
-                              "h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0",
-                              isActive ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-500"
-                            )}>
+                            <div className={cn("h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0", isActive ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-500")}>
                               {record.name.charAt(0).toUpperCase()}
                             </div>
                             <div>
-                              <p className={cn("text-sm font-semibold leading-tight", isActive ? "text-blue-800" : "text-slate-700")}>
-                                {record.name}
-                              </p>
+                              <p className={cn("text-sm font-semibold leading-tight", isActive ? "text-blue-800" : "text-slate-700")}>{record.name}</p>
                               {isActive && <p className="text-blue-400 text-xs">Current user</p>}
                             </div>
                           </div>
                         </TableCell>
-
-                        {/* Age */}
                         <TableCell className="text-slate-500 text-sm">{record.age ?? "—"}</TableCell>
-
-                        {/* Department */}
                         <TableCell className="text-slate-500 text-sm">{record.department}</TableCell>
-
-                        {/* Assigned Vest */}
                         <TableCell>
                           <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 bg-slate-100 rounded-full px-2.5 py-0.5">
                             <TbShirt className="text-slate-400 text-sm" />{record.assignedVest}
                           </span>
                         </TableCell>
-
-                        {/* Assigned At */}
-                        <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">
-                          {formatTs(record.registeredAt)}
-                        </TableCell>
-
-                        {/* Returned At */}
-                        <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">
-                          {record.isReturned ? formatTs(record.returnedAt) : "—"}
-                        </TableCell>
-
-                        {/* Status badge */}
+                        <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{formatTs(record.registeredAt)}</TableCell>
+                        <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{record.isReturned ? formatTs(record.returnedAt) : "—"}</TableCell>
                         <TableCell><ReturnBadge returned={record.isReturned} /></TableCell>
-
-                        {/* IsReturn action */}
                         <TableCell>
                           {isActive ? (
                             <Button
                               size="sm"
                               onClick={() => handleReturn(record)}
                               disabled={isReturning}
-                              className={cn(
-                                "rounded-lg text-xs h-7 px-3 gap-1.5 font-semibold transition-all",
-                                isReturning
-                                  ? "bg-slate-100 text-slate-400 cursor-not-allowed"
-                                  : "bg-amber-500 hover:bg-amber-600 text-white"
-                              )}
+                              className={cn("rounded-lg text-xs h-7 px-3 gap-1.5 font-semibold transition-all", isReturning ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "bg-amber-500 hover:bg-amber-600 text-white")}
                             >
-                              {isReturning
-                                ? <><FiLoader className="animate-spin text-xs" /> Returning…</>
-                                : <><FiRotateCcw className="text-xs" /> Mark Return</>}
+                              {isReturning ? <><FiLoader className="animate-spin text-xs" /> Returning…</> : <><FiRotateCcw className="text-xs" /> Mark Return</>}
                             </Button>
                           ) : (
                             <span className="inline-flex items-center gap-1 text-xs text-slate-400 font-medium">
@@ -685,24 +895,18 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             )}
           </div>
 
-          {/* ── Footer ── */}
           {!loading && records.length > 0 && (
             <div className="px-6 py-3 border-t border-slate-100 flex items-center justify-between">
               <p className="text-slate-400 text-xs">
                 {records.length} assignment{records.length !== 1 ? "s" : ""} total
-                {activeUser && (
-                  <span className="ml-2 text-blue-500 font-medium">· {activeUser.name} currently in use</span>
-                )}
+                {activeUser && <span className="ml-2 text-blue-500 font-medium">· {activeUser.name} currently in use</span>}
               </p>
-              <Button size="sm" variant="outline" onClick={onClose} className="rounded-xl border-slate-200 text-slate-600 text-xs h-7 px-4">
-                Close
-              </Button>
+              <Button size="sm" variant="outline" onClick={onClose} className="rounded-xl border-slate-200 text-slate-600 text-xs h-7 px-4">Close</Button>
             </div>
           )}
         </DialogContent>
       </Dialog>
 
-      {/* Nested sensor log modal */}
       <EventLogModal
         open={sensorLogOpen}
         onClose={() => setSensorLogOpen(false)}
@@ -713,14 +917,9 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
   );
 }
 
-// ─── Registered Users Table ─────────────────────────────────────────
-// Pulls all unique people from `registeredPersonnel`.
-// Shows their current vest status and lets unassigned users pick an available vest.
+// ─── Registered Users Table ───────────────────────────────────────────────────
 
-function RegisteredUsersTable({
-  activeUserMap,
-  onAssignSuccess,
-}: {
+function RegisteredUsersTable({ activeUserMap, onAssignSuccess }: {
   activeUserMap:   Record<string, PersonnelRecord | null>;
   onAssignSuccess: () => void;
 }) {
@@ -729,19 +928,12 @@ function RegisteredUsersTable({
   const [selectedVest, setSelectedVest] = useState<Record<string, string>>({});
   const [assigningId, setAssigningId]   = useState<string | null>(null);
 
-  // Re-fetch users whenever activeUserMap changes so Vest Type column
-  // reflects the latest assignment/return state.
-  // We derive a stable string key from just the vest→name mapping.
   const activeMapKey = VEST_KEYS.map((k) => `${k}:${activeUserMap[k]?.name ?? ""}`).join("|");
 
   useEffect(() => {
-    fetchUniqueUsers().then((data) => {
-      setUsers(data);
-      setLoading(false);
-    });
+    fetchUniqueUsers().then((data) => { setUsers(data); setLoading(false); });
   }, [activeMapKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Vests that are currently free (null = fetched, confirmed no active user)
   const availableVests = VEST_KEYS.filter((k) => activeUserMap[k] === null);
 
   async function handleAssign(user: UniqueUser) {
@@ -749,24 +941,15 @@ function RegisteredUsersTable({
     if (!vestId) return;
     setAssigningId(user.key);
     try {
-      // 1. Write the new assignment to Firestore
       await assignUserToVest(user, vestId);
-      // 2. Clear the row's vest picker
       setSelectedVest((prev) => { const n = { ...prev }; delete n[user.key]; return n; });
-      // 3. Tell the parent to refresh activeUserMap for ALL vests —
-      //    this updates the Live Sensor strip, Registered Vests table,
-      //    and re-triggers the useEffect above to refresh this table too.
       onAssignSuccess();
-    } catch (err) {
-      console.error("Assign error:", err);
-    } finally {
-      setAssigningId(null);
-    }
+    } catch (err) { console.error("Assign error:", err); }
+    finally { setAssigningId(null); }
   }
 
   return (
     <div>
-      {/* Section header */}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-slate-800 text-base font-semibold tracking-wide flex items-center gap-2">
           <FiUsers className="text-lg text-indigo-500" />
@@ -791,40 +974,30 @@ function RegisteredUsersTable({
                 { label: "Assign",     icon: FiCheck },
               ].map(({ label, icon: Icon }) => (
                 <TableHead key={label} className="text-slate-500 text-xs uppercase tracking-wider font-semibold whitespace-nowrap">
-                  <div className="flex items-center gap-1.5">
-                    <Icon className="text-slate-400 text-sm" />{label}
-                  </div>
+                  <div className="flex items-center gap-1.5"><Icon className="text-slate-400 text-sm" />{label}</div>
                 </TableHead>
               ))}
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center py-10">
-                  <div className="flex items-center justify-center gap-2 text-slate-400">
-                    <FiLoader className="animate-spin" />
-                    <span className="text-sm">Loading users…</span>
-                  </div>
-                </TableCell>
-              </TableRow>
+              <TableRow><TableCell colSpan={5} className="text-center py-10">
+                <div className="flex items-center justify-center gap-2 text-slate-400">
+                  <FiLoader className="animate-spin" /><span className="text-sm">Loading users…</span>
+                </div>
+              </TableCell></TableRow>
             ) : users.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center py-10">
-                  <div className="flex flex-col items-center gap-1.5">
-                    <FiUsers className="text-2xl text-slate-300" />
-                    <p className="text-slate-400 text-sm">No users registered yet.</p>
-                    <p className="text-slate-300 text-xs">Use “Register New Device” above to add someone.</p>
-                  </div>
-                </TableCell>
-              </TableRow>
+              <TableRow><TableCell colSpan={5} className="text-center py-10">
+                <div className="flex flex-col items-center gap-1.5">
+                  <FiUsers className="text-2xl text-slate-300" />
+                  <p className="text-slate-400 text-sm">No users registered yet.</p>
+                  <p className="text-slate-300 text-xs">Use "Register New Device" above to add someone.</p>
+                </div>
+              </TableCell></TableRow>
             ) : (
               users.map((user, i) => {
                 const isAssigning = assigningId === user.key;
                 const rowVest     = selectedVest[user.key] ?? "";
-
-                // Check if this person currently holds an active vest
-                // by matching against activeUserMap values
                 const activeEntry = Object.values(activeUserMap).find(
                   (r) => r && r.name === user.name && r.department === user.department
                 );
@@ -832,99 +1005,54 @@ function RegisteredUsersTable({
                 const canAssign = !hasVest && !!rowVest && !isAssigning;
 
                 return (
-                  <TableRow
-                    key={user.key}
-                    className={cn(
-                      "border-slate-100 transition-colors",
-                      hasVest ? "bg-emerald-50/40 hover:bg-emerald-50/70" : "hover:bg-slate-50"
-                    )}
-                  >
-                    {/* # */}
+                  <TableRow key={user.key} className={cn("border-slate-100 transition-colors", hasVest ? "bg-emerald-50/40 hover:bg-emerald-50/70" : "hover:bg-slate-50")}>
                     <TableCell className="text-slate-400 font-mono text-xs w-10">{i + 1}</TableCell>
-
-                    {/* Name */}
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        <div className={cn(
-                          "h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0",
-                          hasVest ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
-                        )}>
+                        <div className={cn("h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0", hasVest ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500")}>
                           {user.name.charAt(0).toUpperCase()}
                         </div>
-                        <p className={cn("text-sm font-semibold", hasVest ? "text-emerald-800" : "text-slate-800")}>
-                          {user.name}
-                        </p>
+                        <p className={cn("text-sm font-semibold", hasVest ? "text-emerald-800" : "text-slate-800")}>{user.name}</p>
                       </div>
                     </TableCell>
-
-                    {/* Department */}
                     <TableCell className="text-slate-500 text-sm">{user.department}</TableCell>
-
-                    {/* Vest Type */}
                     <TableCell>
                       {hasVest ? (
-                        // Currently using a vest — show which one
                         <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-0.5">
                           <TbShirt className="text-emerald-500 text-sm shrink-0" />
                           {activeEntry!.assignedVest}
                           <span className="text-emerald-400 font-normal">· In Use</span>
                         </span>
                       ) : availableVests.length === 0 ? (
-                        // All vests occupied
                         <span className="inline-flex items-center gap-1.5 text-xs text-slate-400 italic">
-                          <TbShirt className="text-slate-300 text-sm" />
-                          No vest available
+                          <TbShirt className="text-slate-300 text-sm" />No vest available
                         </span>
                       ) : (
-                        // Show picker of free vests
-                        <Select
-                          value={rowVest}
-                          onValueChange={(v) =>
-                            setSelectedVest((prev) => ({ ...prev, [user.key]: v }))
-                          }
-                        >
+                        <Select value={rowVest} onValueChange={(v) => setSelectedVest((prev) => ({ ...prev, [user.key]: v }))}>
                           <SelectTrigger className="w-40 h-7 text-xs rounded-lg border-slate-200 bg-slate-50 text-slate-700">
                             <SelectValue placeholder="Select vest…" />
                           </SelectTrigger>
                           <SelectContent className="bg-white border-slate-200 text-slate-800">
                             {availableVests.map((v) => (
                               <SelectItem key={v} value={v}>
-                                <span className="flex items-center gap-2">
-                                  <TbShirt className="text-emerald-500" />
-                                  {v}
-                                  <span className="text-emerald-500 text-xs font-medium">(Available)</span>
-                                </span>
+                                <span className="flex items-center gap-2"><TbShirt className="text-emerald-500" />{v}<span className="text-emerald-500 text-xs font-medium">(Available)</span></span>
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       )}
                     </TableCell>
-
-                    {/* Assign */}
                     <TableCell>
                       {hasVest ? (
-                        <span className="inline-flex items-center gap-1 text-xs text-slate-400">
-                          <FiCheck className="text-emerald-500" /> Assigned
-                        </span>
+                        <span className="inline-flex items-center gap-1 text-xs text-slate-400"><FiCheck className="text-emerald-500" /> Assigned</span>
                       ) : (
-                        <Button
-                          size="sm"
-                          onClick={() => handleAssign(user)}
-                          disabled={!canAssign}
-                          className={cn(
-                            "rounded-lg text-xs h-7 px-3 gap-1.5 font-semibold transition-all",
-                            isAssigning
-                              ? "bg-indigo-100 text-indigo-400 cursor-not-allowed"
-                              : !rowVest
-                                ? "bg-slate-100 text-slate-400 cursor-not-allowed"
-                                : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                          )}
-                        >
-                          {isAssigning
-                            ? <><FiLoader className="animate-spin text-xs" /> Assigning…</>
-                            : <><TbShirt className="text-xs" /> Assign</>
-                          }
+                        <Button size="sm" onClick={() => handleAssign(user)} disabled={!canAssign}
+                          className={cn("rounded-lg text-xs h-7 px-3 gap-1.5 font-semibold transition-all",
+                            isAssigning ? "bg-indigo-100 text-indigo-400 cursor-not-allowed"
+                              : !rowVest ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+                              : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                          )}>
+                          {isAssigning ? <><FiLoader className="animate-spin text-xs" /> Assigning…</> : <><TbShirt className="text-xs" /> Assign</>}
                         </Button>
                       )}
                     </TableCell>
@@ -947,6 +1075,7 @@ const vestColumns: { label: string; icon: React.ElementType }[] = [
   { label: "Current User", icon: FiUser },
   { label: "Department",   icon: FiBriefcase },
   { label: "Status",       icon: FiActivity },
+  { label: "Fall Status",  icon: TbRotate },
   { label: "IsZoneA",      icon: FiMapPin },
   { label: "IsZoneB",      icon: FiMapPin },
   { label: "Dust",         icon: TbWind },
@@ -969,28 +1098,86 @@ export default function SaVestDashboard() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [selectedVest, setSelectedVest] = useState<VestKey>("vest1");
 
-  /**
-   * activeUserMap — keyed by vestId.
-   * Holds the single active (isReturned=false) user for each vest.
-   * undefined = not fetched yet, null = no active user.
-   */
-  const [activeUserMap, setActiveUserMap]       = useState<Record<string, PersonnelRecord | null>>({});
+  const [activeUserMap, setActiveUserMap]     = useState<Record<string, PersonnelRecord | null>>({});
   const [personnelLoading, setPersonnelLoading] = useState(false);
-
-  // Which vest's history modal is open
   const [historyModalVest, setHistoryModalVest] = useState<string | null>(null);
 
+  /**
+   * Per-vest fall detection state.
+   * Stored in a ref map to avoid re-render storms from the countdown setInterval.
+   * We force a re-render via a lightweight counter when any state changes.
+   */
+  const fallStateRef = useRef<Record<string, VestFallState>>(
+    Object.fromEntries(VEST_KEYS.map((k) => [k, { inCountdown: false, confirmed: false, secondsLeft: FALL_THRESHOLDS.confirmSeconds, intervalId: null }]))
+  );
+  const [fallTick, setFallTick] = useState(0); // increment to force re-render
+  const forceFallRender = useCallback(() => setFallTick((n) => n + 1), []);
+
+  // Track last alert type per vest to avoid spamming Firebase
   const lastAlertRef = useRef<Record<string, string | null>>({});
 
-  // ── Load / refresh active user for one vest ──
-  // force=true always re-queries Firestore, bypassing the "already loaded" guard
+  // ── Fall countdown logic ──────────────────────────────────────────────────
+  function startFallCountdown(vestKey: string) {
+    const fs = fallStateRef.current[vestKey];
+    if (fs.inCountdown || fs.confirmed) return; // already running
+
+    fs.inCountdown  = true;
+    fs.secondsLeft  = FALL_THRESHOLDS.confirmSeconds;
+    forceFallRender();
+
+    const id = setInterval(() => {
+      const state = fallStateRef.current[vestKey];
+      state.secondsLeft -= 1;
+      if (state.secondsLeft <= 0) {
+        clearInterval(id);
+        state.intervalId  = null;
+        state.inCountdown = false;
+        state.confirmed   = true;
+        forceFallRender();
+      } else {
+        forceFallRender();
+      }
+    }, 1000);
+
+    fs.intervalId = id;
+  }
+
+  function cancelFallCountdown(vestKey: string) {
+    const fs = fallStateRef.current[vestKey];
+    if (fs.intervalId) { clearInterval(fs.intervalId); fs.intervalId = null; }
+    if (fs.inCountdown) {
+      fs.inCountdown = false;
+      fs.secondsLeft = FALL_THRESHOLDS.confirmSeconds;
+      forceFallRender();
+    }
+  }
+
+  function resetFallState(vestKey: string) {
+    const fs = fallStateRef.current[vestKey];
+    if (fs.intervalId) { clearInterval(fs.intervalId); fs.intervalId = null; }
+    fs.inCountdown = false;
+    fs.confirmed   = false;
+    fs.secondsLeft = FALL_THRESHOLDS.confirmSeconds;
+    forceFallRender();
+  }
+
+  // Cleanup all intervals on unmount
+  useEffect(() => {
+    return () => {
+      VEST_KEYS.forEach((k) => {
+        const id = fallStateRef.current[k].intervalId;
+        if (id) clearInterval(id);
+      });
+    };
+  }, []);
+
+  // ── Active user helpers ───────────────────────────────────────────────────
   async function loadActiveUser(vestKey: string, force = false) {
     if (!force && activeUserMap[vestKey] !== undefined) return;
     const record = await fetchActiveUser(vestKey);
     setActiveUserMap((prev) => ({ ...prev, [vestKey]: record }));
   }
 
-  // Convenience: force-refresh ALL vests at once (called after any assign/return)
   async function refreshAllActiveUsers() {
     const results = await Promise.all(
       VEST_KEYS.map(async (k) => ({ k, record: await fetchActiveUser(k) }))
@@ -1002,47 +1189,101 @@ export default function SaVestDashboard() {
     });
   }
 
-  // ── Realtime DB: vest sensor listeners ──
+  // ── Realtime DB: vest sensor listeners ───────────────────────────────────
   useEffect(() => {
     const unsubs: (() => void)[] = [];
+
     VEST_KEYS.forEach((vestKey, index) => {
       const unsub = onValue(ref(database, `monitoring/${vestKey}`), (snap) => {
         const raw = snap.val() as RawVestData | null;
+
         setVests((prev) => {
           const updated = [...prev];
           const idx     = updated.findIndex((v) => v.id === vestKey);
 
           if (!raw) {
-            const offline: Vest = { id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag, status: "offline", zoneA: false, zoneB: false, temp: 0, humidity: 0, dust: 0, aqi: 0, coGas: 0 };
+            const offline: Vest = {
+              id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
+              status: "offline", zoneA: false, zoneB: false,
+              temp: 0, humidity: 0, dust: 0, aqi: 0, coGas: 0,
+              angularVelocity: 0, angularAcceleration: 0, trunkAngle: 0, tiltAngle: 0,
+              ft1Met: false, ft2Met: false, ft3Met: false, allFallThresholdsMet: false,
+            };
             idx >= 0 ? (updated[idx] = offline) : updated.splice(index, 0, offline);
             return updated;
           }
 
           const sensors = parseVestData(raw);
-          const status  = deriveStatus(sensors);
-          const record: Vest  = { id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag, status, zoneA: sensors.zoneA, zoneB: sensors.zoneB, temp: sensors.temp, humidity: sensors.humidity, dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas };
+          const fs      = fallStateRef.current[vestKey];
+
+          // Drive the countdown based on whether all 3 fall thresholds are met
+          if (sensors.allFallThresholdsMet && !fs.confirmed) {
+            startFallCountdown(vestKey);
+          } else if (!sensors.allFallThresholdsMet && fs.inCountdown) {
+            // Thresholds no longer met — person recovered before countdown ended
+            cancelFallCountdown(vestKey);
+          }
+
+          const status  = deriveStatus(sensors, fs.confirmed);
+          const record: Vest = {
+            id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
+            status, zoneA: sensors.zoneA, zoneB: sensors.zoneB,
+            temp: sensors.temp, humidity: sensors.humidity,
+            dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas,
+            angularVelocity:     sensors.angularVelocity,
+            angularAcceleration: sensors.angularAcceleration,
+            trunkAngle:          sensors.trunkAngle,
+            tiltAngle:           sensors.tiltAngle,
+            ft1Met:              sensors.ft1Met,
+            ft2Met:              sensors.ft2Met,
+            ft3Met:              sensors.ft3Met,
+            allFallThresholdsMet: sensors.allFallThresholdsMet,
+          };
           idx >= 0 ? (updated[idx] = record) : updated.splice(index, 0, record);
 
-          // Persist snapshot to Firestore
-          saveEventLog(vestKey, { timestamp: new Date().toISOString(), temp: sensors.temp, humidity: sensors.humidity, dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas, status, zoneA: sensors.zoneA, zoneB: sensors.zoneB });
+          // Persist to Firestore (includes gyro values)
+          saveEventLog(vestKey, {
+            timestamp:           new Date().toISOString(),
+            temp:                sensors.temp,
+            humidity:            sensors.humidity,
+            dust:                sensors.dust,
+            aqi:                 sensors.aqi,
+            coGas:               sensors.coGas,
+            status,
+            zoneA:               sensors.zoneA,
+            zoneB:               sensors.zoneB,
+            angularVelocity:     sensors.angularVelocity,
+            angularAcceleration: sensors.angularAcceleration,
+            trunkAngle:          sensors.trunkAngle,
+            tiltAngle:           sensors.tiltAngle,
+          });
 
-          // Push alert if threshold crossed
-          const alertType = deriveAlertType(sensors);
+          // Push alert
+          const alertType = deriveAlertType(sensors, fs.confirmed);
           if (alertType && alertType !== lastAlertRef.current[vestKey]) {
             lastAlertRef.current[vestKey] = alertType;
-            push(ref(database, "alerts"), { timestamp: new Date().toISOString().replace("T", " ").slice(0, 19), vest: vestKey, alertType, zoneA: sensors.zoneA, zoneB: sensors.zoneB, dust: sensors.dust, coGas: sensors.coGas, aqi: sensors.aqi, temp: sensors.temp, humidity: sensors.humidity });
+            push(ref(database, "alerts"), {
+              timestamp: new Date().toISOString().replace("T", " ").slice(0, 19),
+              vest: vestKey, alertType,
+              zoneA: sensors.zoneA, zoneB: sensors.zoneB,
+              dust: sensors.dust, coGas: sensors.coGas,
+              aqi: sensors.aqi, temp: sensors.temp, humidity: sensors.humidity,
+            });
           }
           if (!alertType && lastAlertRef.current[vestKey]) lastAlertRef.current[vestKey] = null;
 
           return updated;
         });
       });
+
       unsubs.push(unsub);
     });
+
     return () => unsubs.forEach((u) => u());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Realtime DB: alert log listener ──
+  // ── Alert log listener ────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = onValue(ref(database, "alerts"), (snap) => {
       const data = snap.val();
@@ -1052,22 +1293,24 @@ export default function SaVestDashboard() {
     return () => unsub();
   }, []);
 
-  // ── Pre-fetch active users for all vests on mount ──
+  // ── Initial personnel load ────────────────────────────────────────────────
   useEffect(() => {
     setPersonnelLoading(true);
     Promise.all(VEST_KEYS.map((k) => loadActiveUser(k))).finally(() => setPersonnelLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Refresh for selectedVest when strip vest picker changes ──
   useEffect(() => { loadActiveUser(selectedVest); /* eslint-disable-next-line */ }, [selectedVest]);
 
+  // ── Derived stats ─────────────────────────────────────────────────────────
   const totalVests  = vests.length;
   const onlineCount = vests.filter((v) => v.status === "online").length;
   const alertCount  = vests.filter((v) => v.status === "alert").length;
   const rescueCount = vests.filter((v) => v.status === "rescue").length;
-  const activeVest  = vests.find((v) => v.id === selectedVest);
-  const activeUser  = activeUserMap[selectedVest];
+  const fallCount   = vests.filter((v) => v.status === "fall").length;
+
+  const activeVest = vests.find((v) => v.id === selectedVest);
+  const activeUser = activeUserMap[selectedVest];
 
   const setField = (field: keyof RegisterForm) => (value: string) =>
     setForm((f) => ({ ...f, [field]: value }));
@@ -1094,15 +1337,14 @@ export default function SaVestDashboard() {
         department:   form.department,
         assignedVest: form.assignedVest,
         registeredAt: serverTimestamp(),
-        isReturned:   false,   // ← new field
-        returnedAt:   null,    // ← new field
+        isReturned:   false,
+        returnedAt:   null,
       });
       await loadActiveUser(form.assignedVest, true);
       setSaveSuccess(true);
       setTimeout(() => { setSaveSuccess(false); setSheetOpen(false); setForm(FORM_EMPTY); setFormErrors({}); }, 1500);
-    } catch (err) {
-      console.error("Firestore error:", err);
-    } finally { setSaving(false); }
+    } catch (err) { console.error("Firestore error:", err); }
+    finally { setSaving(false); }
   }
 
   function handleSheetOpenChange(open: boolean) {
@@ -1110,11 +1352,9 @@ export default function SaVestDashboard() {
     if (!open) { setForm(FORM_EMPTY); setFormErrors({}); setSaveSuccess(false); }
   }
 
-  // Called by VestHistoryModal after a return is marked
-  function handleReturnSuccess(vestId: string) {
-    refreshAllActiveUsers();
-  }
+  function handleReturnSuccess(vestId: string) { refreshAllActiveUsers(); }
 
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen w-full bg-slate-50 px-4 py-10">
       <div className="max-w-6xl mx-auto flex flex-col gap-8">
@@ -1172,13 +1412,13 @@ export default function SaVestDashboard() {
             )}
           </div>
 
-          {/* Sensor cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Env sensor cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
             {([
-              { label: "Dust",   value: (activeVest?.dust  ?? 0).toFixed(1), unit: "µg/m³", Icon: TbWind,            warn: (activeVest?.dust  ?? 0) > THRESHOLDS.dust },
-              { label: "CO Gas", value: (activeVest?.coGas ?? 0).toFixed(2), unit: "ppm",   Icon: GiGasMask,         warn: (activeVest?.coGas ?? 0) > THRESHOLDS.coGas },
-              { label: "AQI",    value: (activeVest?.aqi   ?? 0).toFixed(0), unit: "",      Icon: GiGasMask,         warn: (activeVest?.aqi   ?? 0) > THRESHOLDS.aqi },
-              { label: "Temp",   value: (activeVest?.temp  ?? 0).toFixed(1), unit: "°C",    Icon: BsThermometerHalf, warn: (activeVest?.temp  ?? 0) > THRESHOLDS.temp },
+              { label: "Dust",   value: (activeVest?.dust  ?? 0).toFixed(1), unit: "%",  Icon: TbWind,           warn: (activeVest?.dust  ?? 0) > THRESHOLDS.dust },
+              { label: "CO Gas", value: (activeVest?.coGas ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,        warn: (activeVest?.coGas ?? 0) > THRESHOLDS.coGas },
+              { label: "AQI",    value: (activeVest?.aqi   ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,        warn: (activeVest?.aqi   ?? 0) > THRESHOLDS.aqi },
+              { label: "Temp",   value: (activeVest?.temp  ?? 0).toFixed(1), unit: "°C", Icon: BsThermometerHalf,warn: (activeVest?.temp  ?? 0) > THRESHOLDS.temp },
             ] as const).map(({ label, value, unit, Icon, warn }) => (
               <div key={label} className={cn("rounded-xl border px-4 py-3 flex items-center gap-3 transition-colors", warn ? "border-red-200 bg-red-50" : "border-slate-100 bg-slate-50")}>
                 <Icon className={cn("text-lg shrink-0", warn ? "text-red-500" : "text-slate-400")} />
@@ -1192,14 +1432,22 @@ export default function SaVestDashboard() {
               </div>
             ))}
           </div>
+
+          {/* ── FALL DETECTION PANEL (live data, no simulate buttons) ── */}
+          <FallDetectionPanel
+            vest={activeVest}
+            fallState={fallStateRef.current[selectedVest]}
+            onResetFall={() => resetFallState(selectedVest)}
+          />
         </div>
 
         {/* ── STAT CARDS ── */}
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
           <StatCard label="Total Vests" value={totalVests}  icon={TbShirt}              iconColor="text-blue-600"    iconBg="bg-blue-50"    valueColor="text-blue-600"    borderColor="border-blue-100"    />
           <StatCard label="Online"      value={onlineCount} icon={HiOutlineStatusOnline} iconColor="text-emerald-600" iconBg="bg-emerald-50" valueColor="text-emerald-600" borderColor="border-emerald-100" />
           <StatCard label="Alerts"      value={alertCount}  icon={MdOutlineWarningAmber} iconColor="text-amber-600"  iconBg="bg-amber-50"   valueColor="text-amber-600"   borderColor="border-amber-100"   />
           <StatCard label="Need Rescue" value={rescueCount} icon={MdOutlineSos}          iconColor="text-red-600"    iconBg="bg-red-50"     valueColor="text-red-600"     borderColor="border-red-100"     />
+          <StatCard label="Fall Alerts" value={fallCount}   icon={TbRotate }           iconColor="text-red-700"    iconBg="bg-red-100"    valueColor="text-red-700"     borderColor="border-red-200"     />
         </div>
 
         {/* ── REGISTER NEW DEVICE ── */}
@@ -1229,7 +1477,6 @@ export default function SaVestDashboard() {
                 </div>
               </div>
             </SheetHeader>
-
             <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-5">
               <FormField label="Full Name" icon={FiUser} error={formErrors.name}>
                 <Input placeholder="e.g. Juan dela Cruz" value={form.name} onChange={(e) => setField("name")(e.target.value)}
@@ -1263,7 +1510,6 @@ export default function SaVestDashboard() {
                   </SelectContent>
                 </Select>
               </FormField>
-
               {form.name && form.assignedVest && (
                 <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 flex flex-col gap-1">
                   <p className="text-blue-700 text-xs font-semibold uppercase tracking-widest mb-1">Preview</p>
@@ -1274,18 +1520,15 @@ export default function SaVestDashboard() {
                 </div>
               )}
             </div>
-
             <SheetFooter className="px-6 py-4 border-t border-slate-100 flex gap-3">
-              <Button variant="outline" onClick={() => handleSheetOpenChange(false)}
-                className="flex-1 rounded-xl border-slate-200 text-slate-600 hover:text-slate-900 gap-2">
+              <Button variant="outline" onClick={() => handleSheetOpenChange(false)} className="flex-1 rounded-xl border-slate-200 text-slate-600 hover:text-slate-900 gap-2">
                 <FiX className="text-base" /> Cancel
               </Button>
               <Button onClick={handleRegister} disabled={saving || saveSuccess}
-                className={cn("flex-1 rounded-xl font-semibold gap-2 transition-all",
-                  saveSuccess ? "bg-emerald-500 hover:bg-emerald-500 text-white" : "bg-blue-600 hover:bg-blue-700 text-white")}>
+                className={cn("flex-1 rounded-xl font-semibold gap-2 transition-all", saveSuccess ? "bg-emerald-500 hover:bg-emerald-500 text-white" : "bg-blue-600 hover:bg-blue-700 text-white")}>
                 {saveSuccess ? <><FiCheck className="text-base" /> Saved!</>
-                  : saving    ? <><FiLoader className="text-base animate-spin" /> Saving…</>
-                  :             <><RiRfidLine className="text-base" /> Register</>}
+                  : saving  ? <><FiLoader className="text-base animate-spin" /> Saving…</>
+                  :           <><RiRfidLine className="text-base" /> Register</>}
               </Button>
             </SheetFooter>
           </SheetContent>
@@ -1314,8 +1557,13 @@ export default function SaVestDashboard() {
                   vests.map((vest) => {
                     const sc          = statusConfig[vest.status];
                     const currentUser = activeUserMap[vest.id];
+                    const vestFall    = fallStateRef.current[vest.id];
+
                     return (
-                      <TableRow key={vest.id} className="border-slate-100 hover:bg-slate-50 transition-colors">
+                      <TableRow key={vest.id} className={cn(
+                        "border-slate-100 transition-colors",
+                        vestFall?.confirmed ? "bg-red-50/60 hover:bg-red-50" : "hover:bg-slate-50"
+                      )}>
                         <TableCell className="text-slate-800 font-semibold">{vest.name}</TableCell>
                         <TableCell className="text-slate-500 font-mono text-xs">{vest.rfidTag}</TableCell>
 
@@ -1351,15 +1599,36 @@ export default function SaVestDashboard() {
                           </span>
                         </TableCell>
 
+                        {/* Fall Status — per-vest gyroscope indicator */}
+                        <TableCell>
+                          {vestFall?.confirmed ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">
+                              <MdOutlineSos className="text-sm animate-pulse" /> Fall
+                            </span>
+                          ) : vestFall?.inCountdown ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
+                              <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                              {vestFall.secondsLeft}s…
+                            </span>
+                          ) : vest.allFallThresholdsMet ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
+                              <MdOutlineWarningAmber className="text-sm" /> Triggered
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" /> Normal
+                            </span>
+                          )}
+                        </TableCell>
+
                         <TableCell><ZoneBadge active={vest.zoneA} /></TableCell>
                         <TableCell><ZoneBadge active={vest.zoneB} /></TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", vest.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{vest.dust.toFixed(1)}</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", vest.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{vest.coGas.toFixed(2)}</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", vest.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{vest.aqi.toFixed(0)}</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", vest.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{vest.dust.toFixed(1)}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", vest.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{vest.coGas.toFixed(1)}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", vest.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{vest.aqi.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500"  )}>{vest.temp.toFixed(1)}°C</TableCell>
                         <TableCell className="text-purple-600 font-mono text-sm font-semibold">{vest.humidity.toFixed(1)}%</TableCell>
 
-                        {/* View — opens the full history + IsReturn modal */}
                         <TableCell>
                           <Button size="sm" variant="outline"
                             onClick={() => setHistoryModalVest(vest.id)}
@@ -1386,53 +1655,61 @@ export default function SaVestDashboard() {
         <div>
           <SectionHeader icon={LuAlarmClock} label="Alert Logs" iconColor="text-orange-500" badge={alerts.length} />
           <div className="rounded-2xl border border-orange-100 bg-white shadow-sm overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow className="border-orange-100 hover:bg-transparent bg-orange-50">
-                  {["Timestamp", "Vest", "Alert Type", "IsZoneA", "IsZoneB", "Dust", "CO Gas", "AQI", "Temp", "Humidity"].map((h) => (
-                    <TableHead key={h} className="text-orange-600 text-xs uppercase tracking-wider font-semibold">{h}</TableHead>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {alerts.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={10} className="text-center text-slate-400 py-10">
-                      No alerts yet — they appear automatically when sensor thresholds are exceeded.
-                    </TableCell>
+            <div className="overflow-y-auto max-h-[420px]">
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-orange-100 hover:bg-transparent bg-orange-50">
+                    {["Timestamp", "Vest", "Alert Type", "IsZoneA", "IsZoneB", "Dust", "CO Gas", "AQI", "Temp", "Humidity"].map((h) => (
+                      <TableHead key={h} className="text-orange-600 text-xs uppercase tracking-wider font-semibold">{h}</TableHead>
+                    ))}
                   </TableRow>
-                ) : (
-                  alerts.map((log, i) => (
-                    <TableRow key={i} className="border-orange-50 hover:bg-orange-50/60 transition-colors">
-                      <TableCell className="text-slate-400 font-mono text-xs">{log.timestamp}</TableCell>
-                      <TableCell className="text-slate-800 font-semibold">{log.vest}</TableCell>
-                      <TableCell>
-                        <Badge className={cn(
-                          "rounded-full text-xs font-medium border inline-flex items-center gap-1",
-                          log.alertType === "Need Rescue" ? "border-red-200 bg-red-50 text-red-700" : "border-amber-200 bg-amber-50 text-amber-700"
-                        )}>
-                          {log.alertType === "Need Rescue" ? <MdOutlineSos className="text-sm" /> : <MdOutlineWarningAmber className="text-sm" />}
-                          {log.alertType}
-                        </Badge>
+                </TableHeader>
+                <TableBody>
+                  {alerts.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={10} className="text-center text-slate-400 py-10">
+                        No alerts yet — they appear automatically when sensor thresholds are exceeded.
                       </TableCell>
-                      <TableCell><ZoneBadge active={log.zoneA} /></TableCell>
-                      <TableCell><ZoneBadge active={log.zoneB} /></TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", log.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-slate-600")}>{log.dust}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", log.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-slate-600")}>{log.coGas}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", log.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-slate-600")}>{log.aqi}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", log.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-slate-600")}>{log.temp}°C</TableCell>
-                      <TableCell className="text-purple-600 font-mono text-sm font-semibold">{log.humidity}%</TableCell>
                     </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+                  ) : (
+                    alerts.map((log, i) => (
+                      <TableRow key={i} className="border-orange-50 hover:bg-orange-50/60 transition-colors">
+                        <TableCell className="text-slate-400 font-mono text-xs">{log.timestamp}</TableCell>
+                        <TableCell className="text-slate-800 font-semibold">{log.vest}</TableCell>
+                        <TableCell>
+                          <Badge className={cn(
+                            "rounded-full text-xs font-medium border inline-flex items-center gap-1",
+                            log.alertType === "Need Rescue" || log.alertType === "Fall Detected"
+                              ? "border-red-200 bg-red-50 text-red-700"
+                              : "border-amber-200 bg-amber-50 text-amber-700"
+                          )}>
+                            {log.alertType === "Fall Detected"
+                              ? <TbRotate className="text-sm" />
+                              : log.alertType === "Need Rescue"
+                                ? <MdOutlineSos className="text-sm" />
+                                : <MdOutlineWarningAmber className="text-sm" />}
+                            {log.alertType}
+                          </Badge>
+                        </TableCell>
+                        <TableCell><ZoneBadge active={log.zoneA} /></TableCell>
+                        <TableCell><ZoneBadge active={log.zoneB} /></TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", log.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-slate-600")}>{log.dust}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", log.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-slate-600")}>{log.coGas}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", log.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-slate-600")}>{log.aqi}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", log.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-slate-600")}>{log.temp}°C</TableCell>
+                        <TableCell className="text-purple-600 font-mono text-sm font-semibold">{log.humidity}%</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </div>
         </div>
 
       </div>
 
-      {/* ── VEST HISTORY MODAL (contains IsReturn column + nested sensor log) ── */}
+      {/* ── VEST HISTORY MODAL ── */}
       {historyModalVest && (
         <VestHistoryModal
           open={!!historyModalVest}

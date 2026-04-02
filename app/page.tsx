@@ -307,12 +307,11 @@ const statusConfig: Record<Vest["status"], { label: string; className: string; d
 // The ESP32 handles all gyroscope logic and sends `fallDetected: true/false`.
 
 interface FallPanelProps {
-  vest:        Vest | undefined;
-  fallState:   VestFallState;
-  onResetFall: () => void;
+  vest:      Vest | undefined;
+  fallState: VestFallState;
 }
 
-function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
+function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
   if (!vest) return null;
 
   const { inCountdown, confirmed, secondsLeft } = fallState;
@@ -346,15 +345,6 @@ function FallDetectionPanel({ vest, fallState, onResetFall }: FallPanelProps) {
             <p className="text-slate-400 text-xs">{vest.id} · ESP32 fall signal</p>
           </div>
         </div>
-        {confirmed && (
-          <Button
-            size="sm"
-            onClick={onResetFall}
-            className="rounded-lg text-xs h-7 px-3 gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
-          >
-            <FiRotateCcw className="text-xs" /> Reset
-          </Button>
-        )}
       </div>
 
       {/* ── Countdown / Confirmed alert ── */}
@@ -574,7 +564,7 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                   const fell = entry.fallDetected ?? false;
                   return (
                     <TableRow key={i} className="border-slate-100 hover:bg-slate-50 transition-colors">
-                      <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{entry.timestamp.replace("T", " ").slice(0, 19)}</TableCell>
+                      <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{entry.timestamp}</TableCell>
                       <TableCell>
                         <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium", sc.className)}>
                           <span className={cn("h-1.5 w-1.5 rounded-full", sc.dot)} />{sc.label}
@@ -1099,11 +1089,14 @@ export default function SaVestDashboard() {
           const fs      = fallStateRef.current[vestKey];
 
           // Drive the countdown based on the ESP32 fallDetected boolean
-          if (sensors.fallDetected && !fs.confirmed) {
+         if (sensors.fallDetected && !fs.confirmed) {
             startFallCountdown(vestKey);
           } else if (!sensors.fallDetected && fs.inCountdown) {
             // ESP32 cleared the fall signal before countdown ended
             cancelFallCountdown(vestKey);
+          } else if (!sensors.fallDetected && fs.confirmed) {
+            // ESP32 cleared the fall signal after confirmation — auto-reset
+            resetFallState(vestKey);
           }
 
           const status  = deriveStatus(sensors, fs.confirmed);
@@ -1118,7 +1111,7 @@ export default function SaVestDashboard() {
 
           // Persist to Firestore
           saveEventLog(vestKey, {
-            timestamp:    new Date().toISOString(),
+            timestamp: new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" }),
             temp:         sensors.temp,
             humidity:     sensors.humidity,
             dust:         sensors.dust,
@@ -1135,7 +1128,7 @@ export default function SaVestDashboard() {
           if (alertType && alertType !== lastAlertRef.current[vestKey]) {
             lastAlertRef.current[vestKey] = alertType;
             push(ref(database, "alerts"), {
-              timestamp: new Date().toISOString().replace("T", " ").slice(0, 19),
+              timestamp: new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" }),
               vest: vestKey, alertType,
               zoneA: sensors.zoneA, zoneB: sensors.zoneB,
               dust: sensors.dust, coGas: sensors.coGas,
@@ -1306,10 +1299,9 @@ export default function SaVestDashboard() {
           </div>
 
           {/* ── FALL DETECTION PANEL ── */}
-          <FallDetectionPanel
+        <FallDetectionPanel
             vest={activeVest}
             fallState={fallStateRef.current[selectedVest]}
-            onResetFall={() => resetFallState(selectedVest)}
           />
         </div>
 

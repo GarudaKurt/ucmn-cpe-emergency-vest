@@ -72,28 +72,32 @@ const RING_CIRC = 2 * Math.PI * 38; // ≈ 238.76
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface RawVestData {
-  dht22:         string | number;
-  dust:          string | number;
-  mq135:         string | number;
-  mq9:           string | number;
-  zoneA:         boolean;
-  zoneB:         boolean;
-  fallDetected?: boolean; // ESP32 handles fall logic, sends true/false
+  dht22:            string | number;
+  dust:             string | number;
+  mq135:            string | number;
+  mq9:              string | number;
+  zoneA:            boolean;
+  zoneB:            boolean;
+  fallDetected?:    boolean;
+  warningStatus?:   boolean; // NEW
+  emergencyStatus?: boolean; // NEW
 }
 
 interface Vest {
-  id:           string;
-  name:         string;
-  rfidTag:      string;
-  status:       "online" | "offline" | "alert" | "rescue" | "fall";
-  zoneA:        boolean;
-  zoneB:        boolean;
-  temp:         number;
-  humidity:     number;
-  dust:         number;
-  aqi:          number;
-  coGas:        number;
-  fallDetected: boolean;
+  id:              string;
+  name:            string;
+  rfidTag:         string;
+  status:          "online" | "offline" | "alert" | "rescue" | "fall";
+  zoneA:           boolean;
+  zoneB:           boolean;
+  temp:            number;
+  humidity:        number;
+  dust:            number;
+  aqi:             number;
+  coGas:           number;
+  fallDetected:    boolean;
+  warningStatus:   boolean; // NEW
+  emergencyStatus: boolean; // NEW
 }
 
 // Per-vest fall state managed via refs (avoids re-render storms from timers)
@@ -172,14 +176,16 @@ function parseVestData(raw: RawVestData) {
   const dhtParts = dhtRaw.includes(";") ? dhtRaw.split(";") : [dhtRaw, "0"];
 
   return {
-    temp:         Number(dhtParts[0]) || 0,
-    humidity:     Number(dhtParts[1]) || 0,
-    dust:         Number(raw.dust)    || 0,
-    aqi:          Number(raw.mq135)   || 0,
-    coGas:        Number(raw.mq9)     || 0,
-    zoneA:        Boolean(raw.zoneA),
-    zoneB:        Boolean(raw.zoneB),
-    fallDetected: Boolean(raw.fallDetected),
+    temp:            Number(dhtParts[0])     || 0,
+    humidity:        Number(dhtParts[1])     || 0,
+    dust:            Number(raw.dust)        || 0,
+    aqi:             Number(raw.mq135)       || 0,
+    coGas:           Number(raw.mq9)         || 0,
+    zoneA:           Boolean(raw.zoneA),
+    zoneB:           Boolean(raw.zoneB),
+    fallDetected:    Boolean(raw.fallDetected),
+    warningStatus:   Boolean(raw.warningStatus),   // NEW
+    emergencyStatus: Boolean(raw.emergencyStatus), // NEW
   };
 }
 
@@ -303,8 +309,6 @@ const statusConfig: Record<Vest["status"], { label: string; className: string; d
 };
 
 // ─── Fall Detection Panel ─────────────────────────────────────────────────────
-// Shows countdown ring and confirmed-fall alert.
-// The ESP32 handles all gyroscope logic and sends `fallDetected: true/false`.
 
 interface FallPanelProps {
   vest:      Vest | undefined;
@@ -415,6 +419,137 @@ function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── NEW: Warning & Emergency Status Banners ──────────────────────────────────
+
+function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
+  if (!vest) return null;
+  const { warningStatus, emergencyStatus } = vest;
+
+  return (
+    <div className="flex flex-col gap-2">
+
+      {/* ── Warning Status Banner ── */}
+      <div className={cn(
+        "rounded-2xl border p-5 transition-all duration-500",
+        warningStatus
+          ? "border-amber-300 bg-amber-50 shadow-sm shadow-amber-100"
+          : "border-slate-200 bg-white shadow-sm"
+      )}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className={cn(
+              "h-8 w-8 rounded-lg flex items-center justify-center",
+              warningStatus ? "bg-amber-100" : "bg-slate-100"
+            )}>
+              <MdOutlineWarningAmber className={cn(
+                "text-lg",
+                warningStatus ? "text-amber-600" : "text-slate-500"
+              )} />
+            </div>
+            <div>
+              <p className={cn(
+                "text-sm font-semibold leading-tight",
+                warningStatus ? "text-amber-800" : "text-slate-800"
+              )}>
+                Warning Status
+              </p>
+              <p className="text-slate-400 text-xs">{vest.id} · Firebase warningStatus</p>
+            </div>
+          </div>
+          <span className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold shrink-0",
+            warningStatus
+              ? "border-amber-300 bg-amber-100 text-amber-800"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700"
+          )}>
+            <span className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              warningStatus ? "bg-amber-500 animate-pulse" : "bg-emerald-400"
+            )} />
+            {warningStatus ? "Warning Active" : "All Clear"}
+          </span>
+        </div>
+
+        {warningStatus ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-100 px-4 py-2.5 flex items-center gap-2">
+            <MdOutlineWarningAmber className="text-amber-600 text-base animate-pulse shrink-0" />
+            <p className="text-amber-800 text-xs font-medium">
+              Warning triggered from Firebase — warningStatus is <span className="font-bold">true</span>. Check vest conditions immediately.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
+            <p className="text-emerald-700 text-xs font-medium">
+              No warning active — monitoring Firebase warningStatus
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ── Emergency Status Banner ── */}
+      <div className={cn(
+        "rounded-2xl border p-5 transition-all duration-500",
+        emergencyStatus
+          ? "border-red-300 bg-red-50 shadow-md shadow-red-100"
+          : "border-slate-200 bg-white shadow-sm"
+      )}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className={cn(
+              "h-8 w-8 rounded-lg flex items-center justify-center",
+              emergencyStatus ? "bg-red-100" : "bg-slate-100"
+            )}>
+              <MdOutlineSos className={cn(
+                "text-lg",
+                emergencyStatus ? "text-red-600" : "text-slate-500"
+              )} />
+            </div>
+            <div>
+              <p className={cn(
+                "text-sm font-semibold leading-tight",
+                emergencyStatus ? "text-red-800" : "text-slate-800"
+              )}>
+                Emergency Status
+              </p>
+              <p className="text-slate-400 text-xs">{vest.id} · Firebase emergencyStatus</p>
+            </div>
+          </div>
+          <span className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold shrink-0",
+            emergencyStatus
+              ? "border-red-300 bg-red-100 text-red-800"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700"
+          )}>
+            <span className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              emergencyStatus ? "bg-red-600 animate-ping" : "bg-emerald-400"
+            )} />
+            {emergencyStatus ? "EMERGENCY" : "All Clear"}
+          </span>
+        </div>
+
+        {emergencyStatus ? (
+          <div className="rounded-xl border border-red-300 bg-red-100 px-4 py-2.5 flex items-center gap-2">
+            <MdOutlineSos className="text-red-700 text-base animate-pulse shrink-0" />
+            <p className="text-red-800 text-xs font-bold">
+              EMERGENCY triggered from Firebase — emergencyStatus is <span className="font-extrabold">true</span>. Dispatch rescue immediately!
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
+            <p className="text-emerald-700 text-xs font-medium">
+              No emergency active — monitoring Firebase emergencyStatus
+            </p>
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }
@@ -575,7 +710,6 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
                       <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
-                      {/* Fall column — simple true/false from ESP32 */}
                       <TableCell>
                         {fell ? (
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700">
@@ -675,7 +809,7 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             </div>
           </DialogHeader>
 
-          {/* Live sensor strip — env sensors only */}
+          {/* Live sensor strip */}
           {liveVest && (
             <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-5 gap-3">
               {([
@@ -949,6 +1083,8 @@ const vestColumns: { label: string; icon: React.ElementType }[] = [
   { label: "Department",   icon: FiBriefcase },
   { label: "Status",       icon: FiActivity },
   { label: "Fall Status",  icon: TbRotate },
+  { label: "Warning",      icon: MdOutlineWarningAmber }, // NEW
+  { label: "Emergency",    icon: MdOutlineSos },          // NEW
   { label: "IsZoneA",      icon: FiMapPin },
   { label: "IsZoneB",      icon: FiMapPin },
   { label: "Dust",         icon: TbWind },
@@ -975,18 +1111,12 @@ export default function SaVestDashboard() {
   const [personnelLoading, setPersonnelLoading] = useState(false);
   const [historyModalVest, setHistoryModalVest] = useState<string | null>(null);
 
-  /**
-   * Per-vest fall detection state.
-   * Stored in a ref map to avoid re-render storms from the countdown setInterval.
-   * We force a re-render via a lightweight counter when any state changes.
-   */
   const fallStateRef = useRef<Record<string, VestFallState>>(
     Object.fromEntries(VEST_KEYS.map((k) => [k, { inCountdown: false, confirmed: false, secondsLeft: FALL_CONFIRM_SECONDS, intervalId: null }]))
   );
   const [fallTick, setFallTick] = useState(0);
   const forceFallRender = useCallback(() => setFallTick((n) => n + 1), []);
 
-  // Track last alert type per vest to avoid spamming Firebase
   const lastAlertRef = useRef<Record<string, string | null>>({});
 
   // ── Fall countdown logic ──────────────────────────────────────────────────
@@ -1034,7 +1164,6 @@ export default function SaVestDashboard() {
     forceFallRender();
   }
 
-  // Cleanup all intervals on unmount
   useEffect(() => {
     return () => {
       VEST_KEYS.forEach((k) => {
@@ -1079,7 +1208,9 @@ export default function SaVestDashboard() {
               id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
               status: "offline", zoneA: false, zoneB: false,
               temp: 0, humidity: 0, dust: 0, aqi: 0, coGas: 0,
-              fallDetected: false,
+              fallDetected:    false,
+              warningStatus:   false, // NEW
+              emergencyStatus: false, // NEW
             };
             idx >= 0 ? (updated[idx] = offline) : updated.splice(index, 0, offline);
             return updated;
@@ -1088,14 +1219,11 @@ export default function SaVestDashboard() {
           const sensors = parseVestData(raw);
           const fs      = fallStateRef.current[vestKey];
 
-          // Drive the countdown based on the ESP32 fallDetected boolean
-         if (sensors.fallDetected && !fs.confirmed) {
+          if (sensors.fallDetected && !fs.confirmed) {
             startFallCountdown(vestKey);
           } else if (!sensors.fallDetected && fs.inCountdown) {
-            // ESP32 cleared the fall signal before countdown ended
             cancelFallCountdown(vestKey);
           } else if (!sensors.fallDetected && fs.confirmed) {
-            // ESP32 cleared the fall signal after confirmation — auto-reset
             resetFallState(vestKey);
           }
 
@@ -1105,11 +1233,12 @@ export default function SaVestDashboard() {
             status, zoneA: sensors.zoneA, zoneB: sensors.zoneB,
             temp: sensors.temp, humidity: sensors.humidity,
             dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas,
-            fallDetected: sensors.fallDetected,
+            fallDetected:    sensors.fallDetected,
+            warningStatus:   sensors.warningStatus,   // NEW
+            emergencyStatus: sensors.emergencyStatus, // NEW
           };
           idx >= 0 ? (updated[idx] = record) : updated.splice(index, 0, record);
 
-          // Persist to Firestore
           saveEventLog(vestKey, {
             timestamp: new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" }),
             temp:         sensors.temp,
@@ -1123,7 +1252,6 @@ export default function SaVestDashboard() {
             fallDetected: sensors.fallDetected,
           });
 
-          // Push alert
           const alertType = deriveAlertType(sensors, fs.confirmed);
           if (alertType && alertType !== lastAlertRef.current[vestKey]) {
             lastAlertRef.current[vestKey] = alertType;
@@ -1299,19 +1427,15 @@ export default function SaVestDashboard() {
           </div>
 
           {/* ── FALL DETECTION PANEL ── */}
-        <FallDetectionPanel
+          <FallDetectionPanel
             vest={activeVest}
             fallState={fallStateRef.current[selectedVest]}
           />
-        </div>
 
-        {/* ── STAT CARDS ── */}
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
-          <StatCard label="Total Vests" value={totalVests}  icon={TbShirt}               iconColor="text-blue-600"    iconBg="bg-blue-50"    valueColor="text-blue-600"    borderColor="border-blue-100"    />
-          <StatCard label="Online"      value={onlineCount} icon={HiOutlineStatusOnline}  iconColor="text-emerald-600" iconBg="bg-emerald-50" valueColor="text-emerald-600" borderColor="border-emerald-100" />
-          <StatCard label="Alerts"      value={alertCount}  icon={MdOutlineWarningAmber}  iconColor="text-amber-600"  iconBg="bg-amber-50"   valueColor="text-amber-600"   borderColor="border-amber-100"   />
-          <StatCard label="Need Rescue" value={rescueCount} icon={MdOutlineSos}           iconColor="text-red-600"    iconBg="bg-red-50"     valueColor="text-red-600"     borderColor="border-red-100"     />
-          <StatCard label="Fall Alerts" value={fallCount}   icon={TbRotate}               iconColor="text-red-700"    iconBg="bg-red-100"    valueColor="text-red-700"     borderColor="border-red-200"     />
+          {/* ── WARNING & EMERGENCY STATUS BANNERS ── */}
+          <div className="mt-3">
+            <StatusAlertBanners vest={activeVest} />
+          </div>
         </div>
 
         {/* ── REGISTER NEW DEVICE ── */}
@@ -1463,7 +1587,7 @@ export default function SaVestDashboard() {
                           </span>
                         </TableCell>
 
-                        {/* Fall Status — driven by ESP32 fallDetected signal */}
+                        {/* Fall Status */}
                         <TableCell>
                           {vestFall?.confirmed ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">
@@ -1477,6 +1601,32 @@ export default function SaVestDashboard() {
                           ) : vest.fallDetected ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
                               <MdOutlineWarningAmber className="text-sm" /> Triggered
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" /> Normal
+                            </span>
+                          )}
+                        </TableCell>
+
+                        {/* Warning Status — NEW */}
+                        <TableCell>
+                          {vest.warningStatus ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
+                              <MdOutlineWarningAmber className="text-sm animate-pulse" /> Warning
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" /> Normal
+                            </span>
+                          )}
+                        </TableCell>
+
+                        {/* Emergency Status — NEW */}
+                        <TableCell>
+                          {vest.emergencyStatus ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">
+                              <MdOutlineSos className="text-sm animate-pulse" /> Emergency
                             </span>
                           ) : (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">

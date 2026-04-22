@@ -434,6 +434,62 @@ function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
 
   return (
     <div className="flex flex-col gap-2">
+      {/*Warning Status Banner â”€â”€ */}
+      <div className={cn(
+        "rounded-2xl border p-5 transition-all duration-500",
+        warningStatus
+          ? "border-amber-300 bg-amber-50 shadow-sm shadow-amber-100"
+          : "border-slate-200 bg-white shadow-sm"
+      )}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className={cn(
+              "h-8 w-8 rounded-lg flex items-center justify-center",
+              warningStatus ? "bg-amber-100" : "bg-slate-100"
+            )}>
+              <MdOutlineWarningAmber className={cn(
+                "text-lg",
+                warningStatus ? "text-amber-600" : "text-slate-500"
+              )} />
+            </div>
+            <div>
+              <p className={cn(
+               "text-sm font-semibold leading-tight",
+                warningStatus ? "text-amber-800" : "text-slate-800"
+              )}>
+                Working Status
+              </p>
+             <p className="text-slate-400 text-xs">{vest.id} Current Status</p>
+           </div>
+         </div>
+          <span className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold shrink-0",
+          warningStatus
+            ? "border-amber-300 bg-amber-100 text-amber-800"
+            : "border-emerald-200 bg-emerald-50 text-emerald-700"
+        )}>
+           <span className={cn(
+              "h-1.5 w-1.5 rounded-full",
+           warningStatus ? "bg-amber-500 animate-pulse" : "bg-emerald-400"
+         )} />
+           {warningStatus ? "Warning Active" : "All Clear"}
+        </span>
+      </div>
+      {warningStatus ? (
+         <div className="rounded-xl border border-amber-200 bg-amber-100 px-4 py-2.5 flex items-center gap-2">
+            <MdOutlineWarningAmber className="text-amber-600 text-base animate-pulse shrink-0" />
+            <p className="text-amber-800 text-xs font-medium">Is in need assistance <span className="font-bold">true</span>. Check vest conditions immediately.
+            </p>
+          </div>) : (
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
+            <p className="text-emerald-700 text-xs font-medium">
+            On Stable Status
+            </p>
+          </div>
+        )}
+     </div>
+
 
       {/* ── Emergency Status Banner ── */}
       <div className={cn(

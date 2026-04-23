@@ -537,7 +537,7 @@ function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
           <div className="rounded-xl border border-red-300 bg-red-100 px-4 py-2.5 flex items-center gap-2">
             <MdOutlineSos className="text-red-700 text-base animate-pulse shrink-0" />
             <p className="text-red-800 text-xs font-bold">
-              EMERGENCY triggered from Firebase — emergencyStatus is <span className="font-extrabold">true</span>. Dispatch rescue immediately!
+              EMERGENCY triggered Dispatch rescue immediately!
             </p>
           </div>
         ) : (
@@ -1611,7 +1611,7 @@ export default function SaVestDashboard() {
 
                         {/* Warning Status — NEW */}
                         <TableCell>
-                          {vest.warningStatus ? (
+                          {vest.WarningStatus ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
                               <MdOutlineWarningAmber className="text-sm animate-pulse" /> Warning
                             </span>

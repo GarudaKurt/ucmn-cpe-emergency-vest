@@ -1624,7 +1624,7 @@ export default function SaVestDashboard() {
 
                         {/* Emergency Status — NEW */}
                         <TableCell>
-                          {vest.emergencyStatus ? (
+                          {vest.EmergencyStatus ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">
                               <MdOutlineSos className="text-sm animate-pulse" /> Emergency
                             </span>

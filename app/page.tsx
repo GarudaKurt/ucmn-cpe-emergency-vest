@@ -94,7 +94,6 @@ interface Vest {
   zoneA:           boolean;
   zoneB:           boolean;
   temp:            number;
-  humidity:        number;
   dust:            number;
   aqi:             number;
   coGas:           number;
@@ -120,13 +119,11 @@ interface AlertLog {
   coGas:     number;
   aqi:       number;
   temp:      number;
-  humidity:  number;
 }
 
 interface EventLogEntry {
   timestamp:    string;
   temp:         number;
-  humidity:     number;
   dust:         number;
   aqi:          number;
   coGas:        number;
@@ -179,7 +176,6 @@ function parseVestData(raw: RawVestData) {
 
   return {
     temp:            Number(raw.temp)     || 0,
-    humidity:        Number(raw.humid)     || 0,
     dust:            Number(raw.dust)        || 0,
     aqi:             Number(raw.mq135)       || 0,
     coGas:           Number(raw.mq7)         || 0,
@@ -709,7 +705,7 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                   <TableRow className="border-slate-100 hover:bg-transparent bg-slate-50">
                     {[
                       "Timestamp", "Status",
-                      "Temp (°C)", "Humidity (%)", "Dust (%)", "AQI (%)", "CO Gas (%)",
+                      "Temp (°C)", "Dust (%)", "AQI (%)", "CO Gas (%)",
                       "Fall", "IsZoneA", "IsZoneB",
                     ].map((h) => (
                       <TableHead key={h} className="text-slate-500 text-xs uppercase tracking-wider font-semibold whitespace-nowrap">{h}</TableHead>
@@ -729,7 +725,6 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                           </span>
                         </TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500")}>{entry.temp.toFixed(1)}</TableCell>
-                        <TableCell className="text-purple-600 font-mono text-sm font-semibold">{entry.humidity.toFixed(1)}</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
@@ -935,7 +930,6 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-5 gap-3">
               {([
                 { label: "Temp",     value: `${liveVest.temp.toFixed(1)} °C`,      warn: liveVest.temp  > THRESHOLDS.temp },
-                { label: "Humidity", value: `${liveVest.humidity.toFixed(1)} %`,   warn: false },
                 { label: "Dust",     value: `${liveVest.dust.toFixed(1)} %`,       warn: liveVest.dust  > THRESHOLDS.dust },
                 { label: "AQI",      value: `${liveVest.aqi.toFixed(1)} %`,        warn: liveVest.aqi   > THRESHOLDS.aqi },
                 { label: "CO Gas",   value: `${liveVest.coGas.toFixed(1)} %`,      warn: liveVest.coGas > THRESHOLDS.coGas },
@@ -1212,7 +1206,6 @@ const vestColumns: { label: string; icon: React.ElementType }[] = [
   { label: "CO Gas",       icon: GiGasMask },
   { label: "AQI",          icon: GiGasMask },
   { label: "Temp",         icon: BsThermometerHalf },
-  { label: "Humidity",     icon: BsDroplet },
   { label: "Action",       icon: FiEye },
 ];
 
@@ -1325,7 +1318,7 @@ export default function SaVestDashboard() {
             const offline: Vest = {
               id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
               status: "offline", zoneA: false, zoneB: false,
-              temp: 0, humidity: 0, dust: 0, aqi: 0, coGas: 0,
+              temp: 0, dust: 0, aqi: 0, coGas: 0,
               fallDetected:    false,
               WarningStatus:   false,
               EmergencyStatus: false,
@@ -1349,7 +1342,7 @@ export default function SaVestDashboard() {
           const record: Vest = {
             id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
             status, zoneA: sensors.zoneA, zoneB: sensors.zoneB,
-            temp: sensors.temp, humidity: sensors.humidity,
+            temp: sensors.temp,
             dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas,
             fallDetected:    sensors.fallDetected,
             WarningStatus:   sensors.WarningStatus,
@@ -1360,7 +1353,6 @@ export default function SaVestDashboard() {
           saveEventLog(vestKey, {
             timestamp: new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" }),
             temp:         sensors.temp,
-            humidity:     sensors.humidity,
             dust:         sensors.dust,
             aqi:          sensors.aqi,
             coGas:        sensors.coGas,
@@ -1378,7 +1370,7 @@ export default function SaVestDashboard() {
               vest: vestKey, alertType,
               zoneA: sensors.zoneA, zoneB: sensors.zoneB,
               dust: sensors.dust, coGas: sensors.coGas,
-              aqi: sensors.aqi, temp: sensors.temp, humidity: sensors.humidity,
+              aqi: sensors.aqi, temp: sensors.temp,
             });
           }
           if (!alertType && lastAlertRef.current[vestKey]) lastAlertRef.current[vestKey] = null;
@@ -1745,7 +1737,6 @@ export default function SaVestDashboard() {
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{vest.coGas.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{vest.aqi.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500"  )}>{vest.temp.toFixed(1)}°C</TableCell>
-                        <TableCell className="text-purple-600 font-mono text-sm font-semibold">{vest.humidity.toFixed(1)}%</TableCell>
 
                         <TableCell>
                           <Button size="sm" variant="outline"
@@ -1777,7 +1768,7 @@ export default function SaVestDashboard() {
               <Table>
                 <TableHeader>
                   <TableRow className="border-orange-100 hover:bg-transparent bg-orange-50">
-                    {["Timestamp", "Vest", "Alert Type", "IsZoneA", "IsZoneB", "Dust", "CO Gas", "AQI", "Temp", "Humidity"].map((h) => (
+                    {["Timestamp", "Vest", "Alert Type", "IsZoneA", "IsZoneB", "Dust", "CO Gas", "AQI", "Temp"].map((h) => (
                       <TableHead key={h} className="text-orange-600 text-xs uppercase tracking-wider font-semibold">{h}</TableHead>
                     ))}
                   </TableRow>
@@ -1815,7 +1806,6 @@ export default function SaVestDashboard() {
                         <TableCell className={cn("font-mono text-sm font-semibold", log.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-slate-600")}>{log.coGas}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", log.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-slate-600")}>{log.aqi}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", log.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-slate-600")}>{log.temp}°C</TableCell>
-                        <TableCell className="text-purple-600 font-mono text-sm font-semibold">{log.humidity}%</TableCell>
                       </TableRow>
                     ))
                   )}

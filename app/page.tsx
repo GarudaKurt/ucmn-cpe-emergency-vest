@@ -42,7 +42,7 @@ import { RiRfidLine } from "react-icons/ri";
 import {
   FiActivity, FiMapPin, FiEye, FiClipboard, FiPlus,
   FiUser, FiUsers, FiHash, FiBriefcase, FiX, FiCheck, FiLoader,
-  FiRotateCcw,
+  FiRotateCcw, FiTrash2,
 } from "react-icons/fi";
 import { BsThermometerHalf, BsDroplet } from "react-icons/bs";
 import { GiGasMask } from "react-icons/gi";
@@ -58,7 +58,7 @@ import { ref, onValue, push } from "firebase/database";
 import {
   collection, addDoc, serverTimestamp,
   query, where, getDocs,
-  doc, setDoc, getDoc, arrayUnion,
+  doc, setDoc, getDoc,
   updateDoc, Timestamp,
 } from "firebase/firestore";
 
@@ -79,8 +79,8 @@ interface RawVestData {
   zoneA:            boolean;
   zoneB:            boolean;
   fallDetected?:    boolean;
-  WarningStatus?:   boolean; // NEW
-  EmergencyStatus?: boolean; // NEW
+  WarningStatus?:   boolean;
+  EmergencyStatus?: boolean;
   temp:             string | number;
   humid:            string | number;
   mq7:              string | number;
@@ -99,11 +99,10 @@ interface Vest {
   aqi:             number;
   coGas:           number;
   fallDetected:    boolean;
-  WarningStatus:   boolean; // NEW
-  EmergencyStatus: boolean; // NEW
+  WarningStatus:   boolean;
+  EmergencyStatus: boolean;
 }
 
-// Per-vest fall state managed via refs (avoids re-render storms from timers)
 interface VestFallState {
   inCountdown:  boolean;
   confirmed:    boolean;
@@ -188,7 +187,7 @@ function parseVestData(raw: RawVestData) {
     zoneB:           Boolean(raw.zoneB),
     fallDetected:    Boolean(raw.fallDetected),
     WarningStatus:  Boolean(raw.WarningStatus),
-    EmergencyStatus: Boolean(raw.EmergencyStatus), // NEW
+    EmergencyStatus: Boolean(raw.EmergencyStatus),
   };
 }
 
@@ -216,10 +215,11 @@ function formatTs(ts: Timestamp | null): string {
   });
 }
 
-async function saveEventLog(vestId: string, entry: EventLogEntry) {
-  try {
-    await setDoc(doc(firestore, "eventLogs", vestId), { history: arrayUnion(entry) }, { merge: true });
-  } catch (err) { console.error("eventLogs write error:", err); }
+// ─── Event log saving is DISABLED to prevent storage overflow ────────────────
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function saveEventLog(_vestId: string, _entry: EventLogEntry) {
+  // Intentionally a no-op — re-enable once old records are cleared and
+  // a size-cap strategy is in place.
 }
 
 async function fetchVestPersonnel(vestId: string): Promise<PersonnelRecord[]> {
@@ -242,6 +242,16 @@ async function fetchEventLogs(vestId: string): Promise<EventLogEntry[]> {
     return (snap.data()?.history as EventLogEntry[]) ?? [];
   } catch (err) { console.error("eventLogs fetch error:", err); return []; }
 }
+
+// ─── Delete ALL event log records for a vest ─────────────────────────────────
+async function deleteAllEventLogs(vestId: string): Promise<void> {
+  await setDoc(
+    doc(firestore, "eventLogs", vestId),
+    { history: [] },
+    { merge: false }
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchActiveUser(vestId: string): Promise<PersonnelRecord | null> {
   try {
@@ -338,7 +348,6 @@ function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
           : "border-slate-200 bg-white shadow-sm"
     )}>
 
-      {/* Panel header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <div className={cn(
@@ -354,7 +363,6 @@ function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
         </div>
       </div>
 
-      {/* ── Countdown / Confirmed alert ── */}
       {(inCountdown || confirmed) && (
         <div className={cn(
           "rounded-xl border px-4 py-3 flex items-center gap-4 transition-all",
@@ -362,7 +370,6 @@ function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
             ? "border-red-300 bg-red-100"
             : "border-amber-200 bg-amber-50"
         )}>
-          {/* SVG ring */}
           <div className="relative shrink-0" style={{ width: 64, height: 64 }}>
             <svg width="64" height="64" viewBox="0 0 90 90" style={{ transform: "rotate(-90deg)" }}>
               <circle cx="45" cy="45" r="38" fill="none" stroke={confirmed ? "#fca5a5" : "#fde68a"} strokeWidth="6" />
@@ -413,7 +420,6 @@ function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
         </div>
       )}
 
-      {/* ── Idle state — all clear ── */}
       {!inCountdown && !confirmed && (
         <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
@@ -426,7 +432,7 @@ function FallDetectionPanel({ vest, fallState }: FallPanelProps) {
   );
 }
 
-// ─── NEW: Warning & Emergency Status Banners ──────────────────────────────────
+// ─── Warning & Emergency Status Banners ──────────────────────────────────────
 
 function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
   if (!vest) return null;
@@ -434,7 +440,6 @@ function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
 
   return (
     <div className="flex flex-col gap-2">
-      {/*Warning Status Banner â”€â”€ */}
       <div className={cn(
         "rounded-2xl border p-5 transition-all duration-500",
         WarningStatus
@@ -478,7 +483,7 @@ function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
       {WarningStatus ? (
          <div className="rounded-xl border border-amber-200 bg-amber-100 px-4 py-2.5 flex items-center gap-2">
             <MdOutlineWarningAmber className="text-amber-600 text-base animate-pulse shrink-0" />
-            <p className="text-amber-800 text-xs font-medium">Is in need assistance Check vest conditions immediately.
+            <p className="text-amber-800 text-xs font-medium">Is in need assistance Check working conditions immediately.
             </p>
           </div>) : (
           <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
@@ -490,8 +495,6 @@ function StatusAlertBanners({ vest }: { vest: Vest | undefined }) {
         )}
      </div>
 
-
-      {/* ── Emergency Status Banner ── */}
       <div className={cn(
         "rounded-2xl border p-5 transition-all duration-500",
         EmergencyStatus
@@ -637,11 +640,15 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
   vestId:         string;
   activeUserName: string | null;
 }) {
-  const [logs, setLogs]       = useState<EventLogEntry[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [logs, setLogs]               = useState<EventLogEntry[]>([]);
+  const [loading, setLoading]         = useState(false);
+  const [deleting, setDeleting]       = useState(false);
+  const [deleteResult, setDeleteResult] = useState<{ count: number; type: "success" | "error" } | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    setDeleteResult(null);
     setLoading(true);
     fetchEventLogs(vestId).then((entries) => {
       setLogs([...entries].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)));
@@ -649,96 +656,211 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
     });
   }, [open, vestId]);
 
+  async function handleDeleteAll() {
+    setConfirmOpen(false);
+    setDeleting(true);
+    setDeleteResult(null);
+    try {
+      await deleteAllEventLogs(vestId);
+      setDeleteResult({ count: logs.length, type: "success" });
+      setLogs([]);
+    } catch {
+      setDeleteResult({ count: 0, type: "error" });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-4xl w-full bg-white rounded-2xl p-0 overflow-hidden">
-        <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
-              <FiEye className="text-blue-600 text-lg" />
+    <>
+      <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+        <DialogContent className="max-w-4xl w-full bg-white rounded-2xl p-0 overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
+                <FiEye className="text-blue-600 text-lg" />
+              </div>
+              <div>
+                <DialogTitle className="text-slate-900 text-base font-semibold">
+                  Sensor Event Log — {vestId}
+                </DialogTitle>
+                <p className="text-slate-400 text-xs mt-0.5">
+                  {activeUserName ? `Current user: ${activeUserName}` : "No active user"}
+                </p>
+              </div>
             </div>
-            <div>
-              <DialogTitle className="text-slate-900 text-base font-semibold">
-                Sensor Event Log — {vestId}
-              </DialogTitle>
-              <p className="text-slate-400 text-xs mt-0.5">
-                {activeUserName ? `Current user: ${activeUserName}` : "No active user"}
+          </DialogHeader>
+
+          <div className="overflow-auto max-h-[60vh] px-6 py-4">
+            {loading ? (
+              <div className="flex items-center justify-center py-16 gap-2 text-slate-400">
+                <FiLoader className="animate-spin text-lg" />
+                <span className="text-sm">Loading event logs…</span>
+              </div>
+            ) : logs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-2">
+                <LuAlarmClock className="text-3xl text-slate-300" />
+                <p className="text-slate-400 text-sm">No event logs recorded yet.</p>
+                <p className="text-slate-300 text-xs">Logs are saved automatically every 15 s from the ESP32.</p>
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-slate-100 hover:bg-transparent bg-slate-50">
+                    {[
+                      "Timestamp", "Status",
+                      "Temp (°C)", "Humidity (%)", "Dust (%)", "AQI (%)", "CO Gas (%)",
+                      "Fall", "IsZoneA", "IsZoneB",
+                    ].map((h) => (
+                      <TableHead key={h} className="text-slate-500 text-xs uppercase tracking-wider font-semibold whitespace-nowrap">{h}</TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {logs.map((entry, i) => {
+                    const sc   = statusConfig[entry.status as Vest["status"]] ?? statusConfig.online;
+                    const fell = entry.fallDetected ?? false;
+                    return (
+                      <TableRow key={i} className="border-slate-100 hover:bg-slate-50 transition-colors">
+                        <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{entry.timestamp}</TableCell>
+                        <TableCell>
+                          <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium", sc.className)}>
+                            <span className={cn("h-1.5 w-1.5 rounded-full", sc.dot)} />{sc.label}
+                          </span>
+                        </TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", entry.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500")}>{entry.temp.toFixed(1)}</TableCell>
+                        <TableCell className="text-purple-600 font-mono text-sm font-semibold">{entry.humidity.toFixed(1)}</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
+                        <TableCell>
+                          {fell ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700">
+                              <MdOutlineSos className="text-sm" /> Yes
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> No
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell><ZoneBadge active={entry.zoneA} /></TableCell>
+                        <TableCell><ZoneBadge active={entry.zoneB} /></TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+
+          {/* ── Footer ── */}
+          {!loading && (
+            <div className="px-6 py-3 border-t border-slate-100 flex items-center justify-between gap-3">
+              {/* Left side: record count + delete result feedback */}
+              <div className="flex items-center gap-3 min-w-0">
+                <p className="text-slate-400 text-xs shrink-0">
+                  {logs.length} record{logs.length !== 1 ? "s" : ""} total
+                </p>
+                {deleteResult && (
+                  deleteResult.type === "success" ? (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600">
+                      <FiCheck className="text-emerald-500 shrink-0" />
+                      All {deleteResult.count} record{deleteResult.count !== 1 ? "s" : ""} deleted.
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-red-500">
+                      <FiX className="shrink-0" /> Delete failed. Check console.
+                    </span>
+                  )
+                )}
+              </div>
+
+              {/* Right side: Delete + Close buttons */}
+              <div className="flex items-center gap-2 shrink-0">
+                {logs.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setConfirmOpen(true)}
+                    disabled={deleting}
+                    className={cn(
+                      "rounded-xl text-xs h-7 px-4 gap-1.5 transition-all",
+                      deleting
+                        ? "border-slate-200 text-slate-400 cursor-not-allowed"
+                        : "border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300"
+                    )}
+                  >
+                    {deleting ? (
+                      <><FiLoader className="animate-spin text-xs" /> Deleting…</>
+                    ) : (
+                      <><FiTrash2 className="text-xs" /> Delete all records</>
+                    )}
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onClose}
+                  className="rounded-xl border-slate-200 text-slate-600 text-xs h-7 px-4"
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Confirmation Dialog ── */}
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent className="max-w-sm w-full bg-white rounded-2xl p-0 overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-red-50 flex items-center justify-center shrink-0">
+                <FiTrash2 className="text-red-500 text-lg" />
+              </div>
+              <div>
+                <DialogTitle className="text-slate-900 text-base font-semibold">
+                  Confirm Deletion
+                </DialogTitle>
+                <p className="text-slate-400 text-xs mt-0.5">{vestId} · event log</p>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="px-6 py-5">
+            <p className="text-slate-700 text-sm leading-relaxed">
+              This will permanently delete{" "}
+              <span className="font-semibold text-red-600">all {logs.length} records</span>{" "}
+              from <span className="font-semibold">{vestId}</span>'s event log.
+            </p>
+            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 flex items-start gap-2">
+              <MdOutlineWarningAmber className="text-amber-500 text-base mt-0.5 shrink-0" />
+              <p className="text-amber-800 text-xs leading-relaxed">
+                This action cannot be undone. The entire event log will be cleared from Firestore.
               </p>
             </div>
           </div>
-        </DialogHeader>
 
-        <div className="overflow-auto max-h-[60vh] px-6 py-4">
-          {loading ? (
-            <div className="flex items-center justify-center py-16 gap-2 text-slate-400">
-              <FiLoader className="animate-spin text-lg" />
-              <span className="text-sm">Loading event logs…</span>
-            </div>
-          ) : logs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 gap-2">
-              <LuAlarmClock className="text-3xl text-slate-300" />
-              <p className="text-slate-400 text-sm">No event logs recorded yet.</p>
-              <p className="text-slate-300 text-xs">Logs are saved automatically every 15 s from the ESP32.</p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="border-slate-100 hover:bg-transparent bg-slate-50">
-                  {[
-                    "Timestamp", "Status",
-                    "Temp (°C)", "Humidity (%)", "Dust (%)", "AQI (%)", "CO Gas (%)",
-                    "Fall", "IsZoneA", "IsZoneB",
-                  ].map((h) => (
-                    <TableHead key={h} className="text-slate-500 text-xs uppercase tracking-wider font-semibold whitespace-nowrap">{h}</TableHead>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {logs.map((entry, i) => {
-                  const sc   = statusConfig[entry.status as Vest["status"]] ?? statusConfig.online;
-                  const fell = entry.fallDetected ?? false;
-                  return (
-                    <TableRow key={i} className="border-slate-100 hover:bg-slate-50 transition-colors">
-                      <TableCell className="text-slate-400 font-mono text-xs whitespace-nowrap">{entry.timestamp}</TableCell>
-                      <TableCell>
-                        <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium", sc.className)}>
-                          <span className={cn("h-1.5 w-1.5 rounded-full", sc.dot)} />{sc.label}
-                        </span>
-                      </TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500")}>{entry.temp.toFixed(1)}</TableCell>
-                      <TableCell className="text-purple-600 font-mono text-sm font-semibold">{entry.humidity.toFixed(1)}</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
-                      <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
-                      <TableCell>
-                        {fell ? (
-                          <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700">
-                            <MdOutlineSos className="text-sm" /> Yes
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
-                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> No
-                          </span>
-                        )}
-                      </TableCell>
-                      <TableCell><ZoneBadge active={entry.zoneA} /></TableCell>
-                      <TableCell><ZoneBadge active={entry.zoneB} /></TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </div>
-
-        {!loading && logs.length > 0 && (
-          <div className="px-6 py-3 border-t border-slate-100 flex items-center justify-between">
-            <p className="text-slate-400 text-xs">{logs.length} record{logs.length !== 1 ? "s" : ""} total</p>
-            <Button size="sm" variant="outline" onClick={onClose} className="rounded-xl border-slate-200 text-slate-600 text-xs h-7 px-4">Close</Button>
+          <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
+            <Button
+              variant="outline"
+              onClick={() => setConfirmOpen(false)}
+              className="flex-1 rounded-xl border-slate-200 text-slate-600 hover:text-slate-900 text-sm h-9 gap-2"
+            >
+              <FiX className="text-base" /> Cancel
+            </Button>
+            <Button
+              onClick={handleDeleteAll}
+              className="flex-1 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold text-sm h-9 gap-2"
+            >
+              <FiTrash2 className="text-base" /> Yes, delete all
+            </Button>
           </div>
-        )}
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -809,7 +931,6 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
             </div>
           </DialogHeader>
 
-          {/* Live sensor strip */}
           {liveVest && (
             <div className="px-6 py-3 border-b border-slate-100 grid grid-cols-5 gap-3">
               {([
@@ -1083,8 +1204,8 @@ const vestColumns: { label: string; icon: React.ElementType }[] = [
   { label: "Department",   icon: FiBriefcase },
   { label: "Status",       icon: FiActivity },
   { label: "Fall Status",  icon: TbRotate },
-  { label: "Warning",      icon: MdOutlineWarningAmber }, // NEW
-  { label: "Emergency",    icon: MdOutlineSos },          // NEW
+  { label: "Warning",      icon: MdOutlineWarningAmber },
+  { label: "Emergency",    icon: MdOutlineSos },
   { label: "IsZoneA",      icon: FiMapPin },
   { label: "IsZoneB",      icon: FiMapPin },
   { label: "Dust",         icon: TbWind },
@@ -1119,7 +1240,6 @@ export default function SaVestDashboard() {
 
   const lastAlertRef = useRef<Record<string, string | null>>({});
 
-  // ── Fall countdown logic ──────────────────────────────────────────────────
   function startFallCountdown(vestKey: string) {
     const fs = fallStateRef.current[vestKey];
     if (fs.inCountdown || fs.confirmed) return;
@@ -1173,7 +1293,6 @@ export default function SaVestDashboard() {
     };
   }, []);
 
-  // ── Active user helpers ───────────────────────────────────────────────────
   async function loadActiveUser(vestKey: string, force = false) {
     if (!force && activeUserMap[vestKey] !== undefined) return;
     const record = await fetchActiveUser(vestKey);
@@ -1191,7 +1310,6 @@ export default function SaVestDashboard() {
     });
   }
 
-  // ── Realtime DB: vest sensor listeners ───────────────────────────────────
   useEffect(() => {
     const unsubs: (() => void)[] = [];
 
@@ -1209,8 +1327,8 @@ export default function SaVestDashboard() {
               status: "offline", zoneA: false, zoneB: false,
               temp: 0, humidity: 0, dust: 0, aqi: 0, coGas: 0,
               fallDetected:    false,
-              WarningStatus:   false, // NEW
-              EmergencyStatus: false, // NEW
+              WarningStatus:   false,
+              EmergencyStatus: false,
             };
             idx >= 0 ? (updated[idx] = offline) : updated.splice(index, 0, offline);
             return updated;
@@ -1234,8 +1352,8 @@ export default function SaVestDashboard() {
             temp: sensors.temp, humidity: sensors.humidity,
             dust: sensors.dust, aqi: sensors.aqi, coGas: sensors.coGas,
             fallDetected:    sensors.fallDetected,
-            WarningStatus:   sensors.WarningStatus,   // NEW
-            EmergencyStatus: sensors.EmergencyStatus, // NEW
+            WarningStatus:   sensors.WarningStatus,
+            EmergencyStatus: sensors.EmergencyStatus,
           };
           idx >= 0 ? (updated[idx] = record) : updated.splice(index, 0, record);
 
@@ -1276,7 +1394,6 @@ export default function SaVestDashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Alert log listener ────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = onValue(ref(database, "alerts"), (snap) => {
       const data = snap.val();
@@ -1286,7 +1403,6 @@ export default function SaVestDashboard() {
     return () => unsub();
   }, []);
 
-  // ── Initial personnel load ────────────────────────────────────────────────
   useEffect(() => {
     setPersonnelLoading(true);
     Promise.all(VEST_KEYS.map((k) => loadActiveUser(k))).finally(() => setPersonnelLoading(false));
@@ -1295,7 +1411,6 @@ export default function SaVestDashboard() {
 
   useEffect(() => { loadActiveUser(selectedVest); /* eslint-disable-next-line */ }, [selectedVest]);
 
-  // ── Derived stats ─────────────────────────────────────────────────────────
   const totalVests  = vests.length;
   const onlineCount = vests.filter((v) => v.status === "online").length;
   const alertCount  = vests.filter((v) => v.status === "alert").length;
@@ -1347,7 +1462,6 @@ export default function SaVestDashboard() {
 
   function handleReturnSuccess(vestId: string) { refreshAllActiveUsers(); }
 
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen w-full bg-slate-50 px-4 py-10">
       <div className="max-w-6xl mx-auto flex flex-col gap-8">
@@ -1376,7 +1490,6 @@ export default function SaVestDashboard() {
             </Select>
           </div>
 
-          {/* Active user banner */}
           <div className={cn(
             "mb-3 rounded-xl border px-4 py-3 flex items-center gap-4 transition-colors",
             personnelLoading ? "border-slate-100 bg-slate-50" : activeUser ? "border-blue-100 bg-blue-50" : "border-slate-100 bg-slate-50"
@@ -1405,7 +1518,6 @@ export default function SaVestDashboard() {
             )}
           </div>
 
-          {/* Env sensor cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
             {([
               { label: "Dust",   value: (activeVest?.dust  ?? 0).toFixed(1), unit: "%",  Icon: TbWind,            warn: (activeVest?.dust  ?? 0) > THRESHOLDS.dust },
@@ -1426,13 +1538,11 @@ export default function SaVestDashboard() {
             ))}
           </div>
 
-          {/* ── FALL DETECTION PANEL ── */}
           <FallDetectionPanel
             vest={activeVest}
             fallState={fallStateRef.current[selectedVest]}
           />
 
-          {/* ── WARNING & EMERGENCY STATUS BANNERS ── */}
           <div className="mt-3">
             <StatusAlertBanners vest={activeVest} />
           </div>
@@ -1555,7 +1665,6 @@ export default function SaVestDashboard() {
                         <TableCell className="text-slate-800 font-semibold">{vest.name}</TableCell>
                         <TableCell className="text-slate-500 font-mono text-xs">{vest.rfidTag}</TableCell>
 
-                        {/* Current User */}
                         <TableCell>
                           {currentUser === undefined ? (
                             <span className="text-slate-300 italic text-xs">…</span>
@@ -1573,21 +1682,18 @@ export default function SaVestDashboard() {
                           )}
                         </TableCell>
 
-                        {/* Department */}
                         <TableCell className="text-slate-500 text-sm">
                           {currentUser === undefined ? <span className="text-slate-300 italic text-xs">…</span>
                             : currentUser ? currentUser.department
                             : <span className="text-slate-300 italic text-xs">—</span>}
                         </TableCell>
 
-                        {/* Status */}
                         <TableCell>
                           <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium", sc.className)}>
                             <span className={cn("h-1.5 w-1.5 rounded-full", sc.dot)} />{sc.label}
                           </span>
                         </TableCell>
 
-                        {/* Fall Status */}
                         <TableCell>
                           {vestFall?.confirmed ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">
@@ -1609,7 +1715,6 @@ export default function SaVestDashboard() {
                           )}
                         </TableCell>
 
-                        {/* Warning Status — NEW */}
                         <TableCell>
                           {vest.WarningStatus ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
@@ -1622,7 +1727,6 @@ export default function SaVestDashboard() {
                           )}
                         </TableCell>
 
-                        {/* Emergency Status — NEW */}
                         <TableCell>
                           {vest.EmergencyStatus ? (
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800">

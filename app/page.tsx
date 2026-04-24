@@ -166,8 +166,16 @@ const DEPARTMENTS = [
   "Safety & Compliance", "Logistics", "Management",
 ];
 
-const THRESHOLDS = { dust: 70, coGas: 70, aqi: 70, temp: 37.0 };
+//const THRESHOLDS = { dust: 600, coGas: 1100, aqi: 559, temp: 37.0 }; //Vest 1: coGas is set to 1100 Vest2: coGas: 950 , and for Vest1 AQI is 550 and Vest2 950
 
+const THRESHOLDS = { dust: 600, coGas: 950, temp: 37.0 };
+const AQI_THRESHOLDS: Record<string, number> = {
+  vest1: 550,
+  vest2: 950,
+};
+function getAqiThreshold(vestId: string): number {
+  return AQI_THRESHOLDS[vestId] ?? 950;
+}
 // ─── Data Helpers ─────────────────────────────────────────────────────────────
 
 function parseVestData(raw: RawVestData) {
@@ -187,19 +195,19 @@ function parseVestData(raw: RawVestData) {
   };
 }
 
-function deriveStatus(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean): Vest["status"] {
-  if (fallConfirmed)                                                                            return "fall";
-  if (s.temp  > THRESHOLDS.temp)                                                               return "rescue";
-  if (s.dust  > THRESHOLDS.dust || s.coGas > THRESHOLDS.coGas || s.aqi > THRESHOLDS.aqi)      return "alert";
+function deriveStatus(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean, vestId: string): Vest["status"] {
+  if (fallConfirmed)                                                                                          return "fall";
+  if (s.temp  > THRESHOLDS.temp)                                                                              return "rescue";
+  if (s.dust  > THRESHOLDS.dust || s.coGas > THRESHOLDS.coGas || s.aqi > getAqiThreshold(vestId))           return "alert";
   return "online";
 }
 
-function deriveAlertType(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean): string | null {
-  if (fallConfirmed)              return "Fall Detected";
-  if (s.temp  > THRESHOLDS.temp)  return "Need Rescue";
-  if (s.dust  > THRESHOLDS.dust)  return "High Dust";
-  if (s.coGas > THRESHOLDS.coGas) return "High CO Gas";
-  if (s.aqi   > THRESHOLDS.aqi)   return "High AQI";
+function deriveAlertType(s: ReturnType<typeof parseVestData>, fallConfirmed: boolean, vestId: string): string | null {
+  if (fallConfirmed)                             return "Fall Detected";
+  if (s.temp  > THRESHOLDS.temp)                 return "Need Rescue";
+  if (s.dust  > THRESHOLDS.dust)                 return "High Dust";
+  if (s.coGas > THRESHOLDS.coGas)                return "High CO Gas";
+  if (s.aqi   > getAqiThreshold(vestId))         return "High AQI";
   return null;
 }
 
@@ -726,7 +734,7 @@ function EventLogModal({ open, onClose, vestId, activeUserName }: {
                         </TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500")}>{entry.temp.toFixed(1)}</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{entry.dust.toFixed(1)}%</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", entry.aqi > getAqiThreshold(vestId) ? "text-amber-500" : "text-emerald-600")}>{entry.aqi.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", entry.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{entry.coGas.toFixed(1)}%</TableCell>
                         <TableCell>
                           {fell ? (
@@ -931,7 +939,7 @@ function VestHistoryModal({ open, onClose, vestId, liveVest, onReturnSuccess }: 
               {([
                 { label: "Temp",     value: `${liveVest.temp.toFixed(1)} °C`,      warn: liveVest.temp  > THRESHOLDS.temp },
                 { label: "Dust",     value: `${liveVest.dust.toFixed(1)} %`,       warn: liveVest.dust  > THRESHOLDS.dust },
-                { label: "AQI",      value: `${liveVest.aqi.toFixed(1)} %`,        warn: liveVest.aqi   > THRESHOLDS.aqi },
+                { label: "AQI",      value: `${liveVest.aqi.toFixed(1)} %`,        warn: liveVest.aqi > getAqiThreshold(liveVest.id) },
                 { label: "CO Gas",   value: `${liveVest.coGas.toFixed(1)} %`,      warn: liveVest.coGas > THRESHOLDS.coGas },
               ] as const).map(({ label, value, warn }) => (
                 <div key={label} className={cn("rounded-xl border px-3 py-2 text-center", warn ? "border-red-100 bg-red-50" : "border-slate-100 bg-slate-50")}>
@@ -1338,7 +1346,7 @@ export default function SaVestDashboard() {
             resetFallState(vestKey);
           }
 
-          const status  = deriveStatus(sensors, fs.confirmed);
+          const status  = deriveStatus(sensors, fs.confirmed, vestKey);
           const record: Vest = {
             id: vestKey, name: vestKey, rfidTag: VEST_META[vestKey].rfidTag,
             status, zoneA: sensors.zoneA, zoneB: sensors.zoneB,
@@ -1362,7 +1370,7 @@ export default function SaVestDashboard() {
             fallDetected: sensors.fallDetected,
           });
 
-          const alertType = deriveAlertType(sensors, fs.confirmed);
+          const alertType = deriveAlertType(sensors, fs.confirmed, vestKey);
           if (alertType && alertType !== lastAlertRef.current[vestKey]) {
             lastAlertRef.current[vestKey] = alertType;
             push(ref(database, "alerts"), {
@@ -1514,7 +1522,7 @@ export default function SaVestDashboard() {
             {([
               { label: "Dust",   value: (activeVest?.dust  ?? 0).toFixed(1), unit: "%",  Icon: TbWind,            warn: (activeVest?.dust  ?? 0) > THRESHOLDS.dust },
               { label: "CO Gas", value: (activeVest?.coGas ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,         warn: (activeVest?.coGas ?? 0) > THRESHOLDS.coGas },
-              { label: "AQI",    value: (activeVest?.aqi   ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,         warn: (activeVest?.aqi   ?? 0) > THRESHOLDS.aqi },
+              { label: "AQI",    value: (activeVest?.aqi   ?? 0).toFixed(1), unit: "%",  Icon: GiGasMask,         warn: (activeVest?.aqi ?? 0) > getAqiThreshold(activeVest?.id ?? "")},
               { label: "Temp",   value: (activeVest?.temp  ?? 0).toFixed(1), unit: "°C", Icon: BsThermometerHalf, warn: (activeVest?.temp  ?? 0) > THRESHOLDS.temp },
             ] as const).map(({ label, value, unit, Icon, warn }) => (
               <div key={label} className={cn("rounded-xl border px-4 py-3 flex items-center gap-3 transition-colors", warn ? "border-red-200 bg-red-50" : "border-slate-100 bg-slate-50")}>
@@ -1804,7 +1812,7 @@ export default function SaVestDashboard() {
                         <TableCell><ZoneBadge active={log.zoneB} /></TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", log.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-slate-600")}>{log.dust}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", log.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-slate-600")}>{log.coGas}%</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", log.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-slate-600")}>{log.aqi}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", log.aqi > getAqiThreshold(log.vest)   ? "text-amber-500" : "text-slate-600")}>{log.aqi}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", log.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-slate-600")}>{log.temp}°C</TableCell>
                       </TableRow>
                     ))

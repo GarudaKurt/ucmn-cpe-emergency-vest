@@ -1743,9 +1743,10 @@ export default function SaVestDashboard() {
                         <TableCell><ZoneBadge active={vest.zoneB} /></TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-emerald-600")}>{vest.dust.toFixed(1)}%</TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-emerald-600")}>{vest.coGas.toFixed(1)}%</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", vest.aqi   > THRESHOLDS.aqi   ? "text-amber-500" : "text-emerald-600")}>{vest.aqi.toFixed(1)}%</TableCell>
+                        <TableCell className={cn("font-mono text-sm font-semibold", vest.aqi > getAqiThreshold(vest.id) ? "text-amber-500" : "text-emerald-600")}>
+                          {vest.aqi.toFixed(1)}%
+                        </TableCell>
                         <TableCell className={cn("font-mono text-sm font-semibold", vest.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-blue-500"  )}>{vest.temp.toFixed(1)}°C</TableCell>
-
                         <TableCell>
                           <Button size="sm" variant="outline"
                             onClick={() => setHistoryModalVest(vest.id)}

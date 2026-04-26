@@ -1870,7 +1870,11 @@ export default function SaVestDashboard() {
                 </TableRow>
               ) : (
                 [...alerts]
-                  .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+               .sort(
+                    (a, b) =>
+                      new Date(b.timestamp).getTime() -
+                      new Date(a.timestamp).getTime()
+                  )
                   .map((log, i) => (
                     <TableRow key={i} className="border-orange-50 hover:bg-orange-50/60 transition-colors">
 

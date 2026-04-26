@@ -1217,8 +1217,74 @@ const vestColumns: { label: string; icon: React.ElementType }[] = [
   { label: "Action",       icon: FiEye },
 ];
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+// ─── Main Component ──────// Add this component above your SaVestDashboard return
+function NotificationPrompt() {
+  const [permission, setPermission] = useState<NotificationPermission | null>(null);
 
+  useEffect(() => {
+    if (typeof Notification !== 'undefined') {
+      setPermission(Notification.permission);
+    }
+  }, []);
+
+  async function handleEnable() {
+    const result = await Notification.requestPermission();
+    setPermission(result);
+    if (result === 'granted') {
+      // Re-run the full push registration
+      window.location.reload();
+    }
+  }
+
+  if (permission === 'granted' || permission === null) return null;
+
+  return (
+    <div className={cn(
+      "rounded-2xl border p-4 flex items-center justify-between gap-4",
+      permission === 'denied'
+        ? "border-red-200 bg-red-50"
+        : "border-blue-200 bg-blue-50"
+    )}>
+      <div className="flex items-center gap-3">
+        <div className={cn(
+          "h-9 w-9 rounded-xl flex items-center justify-center shrink-0",
+          permission === 'denied' ? "bg-red-100" : "bg-blue-100"
+        )}>
+          <LuAlarmClock className={cn(
+            "text-lg",
+            permission === 'denied' ? "text-red-500" : "text-blue-500"
+          )} />
+        </div>
+        <div>
+          <p className={cn(
+            "text-sm font-semibold",
+            permission === 'denied' ? "text-red-800" : "text-blue-800"
+          )}>
+            {permission === 'denied'
+              ? "Notifications Blocked"
+              : "Enable Push Notifications"}
+          </p>
+          <p className={cn(
+            "text-xs mt-0.5",
+            permission === 'denied' ? "text-red-500" : "text-blue-500"
+          )}>
+            {permission === 'denied'
+              ? "Go to browser settings → allow notifications for this site"
+              : "Get instant alerts when sensor thresholds are exceeded"}
+          </p>
+        </div>
+      </div>
+      {permission !== 'denied' && (
+        <Button
+          onClick={handleEnable}
+          className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-xl px-4 h-8 shrink-0"
+        >
+          Enable Alerts
+        </Button>
+      )}
+    </div>
+  );
+}
 export default function SaVestDashboard() {
   const [vests, setVests]             = useState<Vest[]>([]);
   const [alerts, setAlerts]           = useState<AlertLog[]>([]);
@@ -1241,7 +1307,7 @@ export default function SaVestDashboard() {
 
   const lastAlertRef = useRef<Record<string, string | null>>({});
   usePushNotifications(); // registers the browser for push on mount
-
+  <NotificationPrompt />
     function startFallCountdown(vestKey: string) {
       const fs = fallStateRef.current[vestKey];
       if (fs.inCountdown || fs.confirmed) return;

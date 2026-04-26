@@ -30,28 +30,17 @@ export function usePushNotifications() {
   useEffect(() => {
     if (subscribed.current) return;
     if (typeof window === 'undefined') return;
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-      console.warn('[SaVest] Push not supported in this browser.');
-      return;
-    }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
 
-    // With this:
-    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY 
-    || 'BOKIDUsRrxXrhkF76-sulTMuWFwW9YYUhFzcmKLySLPLj0kfRJMFLKPi1xc3nV13sj6LRuie6JQgzTb8YST1a0o'; // ← paste your actual public key
+    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || 'BOKIDUsRrxXrhkF76-sulTMuWFwW9YYUhFzcmKLySLPLj0kfRJMFLKPi1xc3nV13sj6LRuie6JQgzTb8YST1a0o';
+    if (!vapidKey) return;
 
-    if (!vapidKey) {
-    console.error('[SaVest] NEXT_PUBLIC_VAPID_PUBLIC_KEY is missing!');
-    return;
-    }
+    // Only auto-run if permission already granted
+    // New devices will use the NotificationPrompt button instead
+    if (Notification.permission !== 'granted') return;
 
     async function setup() {
       try {
-        const permission = await Notification.requestPermission();
-        if (permission !== 'granted') {
-          console.warn('[SaVest] Notification permission denied.');
-          return;
-        }
-
         const reg = await navigator.serviceWorker.register('/sw.js', {
           scope: '/',
           updateViaCache: 'none',
@@ -63,7 +52,7 @@ export function usePushNotifications() {
         const existingSub = await reg.pushManager.getSubscription();
         if (existingSub) {
           const deviceId = getDeviceId();
-          await fetch('/api/push/subscribe', { // ✅ fixed path
+          await fetch('/api/push/subscribe', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ subscription: existingSub.toJSON(), deviceId }),
@@ -73,15 +62,15 @@ export function usePushNotifications() {
           return;
         }
 
-        const applicationServerKey = urlBase64ToUint8Array(vapidKey!);
-
+        // New subscription
+        const applicationServerKey = urlBase64ToUint8Array(vapidKey);
         const sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: applicationServerKey.buffer as ArrayBuffer,
         });
 
         const deviceId = getDeviceId();
-        const res = await fetch('/api/push/subscribe', { // ✅ fixed path
+        const res = await fetch('/api/push/subscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ subscription: sub.toJSON(), deviceId }),
@@ -102,9 +91,62 @@ export function usePushNotifications() {
   }, []);
 }
 
+// Called externally to trigger a push to all subscribed devices
+export async function registerPushAndSubscribe(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+
+  const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || 'BOKIDUsRrxXrhkF76-sulTMuWFwW9YYUhFzcmKLySLPLj0kfRJMFLKPi1xc3nV13sj6LRuie6JQgzTb8YST1a0o';
+  if (!vapidKey) return;
+
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      console.warn('[SaVest] Notification permission denied.');
+      return;
+    }
+
+    const reg = await navigator.serviceWorker.register('/sw.js', {
+      scope: '/',
+      updateViaCache: 'none',
+    });
+
+    await navigator.serviceWorker.ready;
+
+    const existingSub = await reg.pushManager.getSubscription();
+    if (existingSub) {
+      const deviceId = getDeviceId();
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: existingSub.toJSON(), deviceId }),
+      });
+      console.log('[SaVest] Re-registered existing subscription after permission grant.');
+      return;
+    }
+
+    const applicationServerKey = urlBase64ToUint8Array(vapidKey);
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: applicationServerKey.buffer as ArrayBuffer,
+    });
+
+    const deviceId = getDeviceId();
+    await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub.toJSON(), deviceId }),
+    });
+
+    console.log('[SaVest] New device registered for push notifications.');
+  } catch (err) {
+    console.error('[SaVest] registerPushAndSubscribe failed:', err);
+  }
+}
+
 export async function sendPushAlert(title: string, body: string, tag?: string) {
   try {
-    const res = await fetch('/api/push/send', { // ✅ fixed path
+    const res = await fetch('/api/push/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body, tag, url: '/' }),

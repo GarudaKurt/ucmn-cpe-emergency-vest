@@ -35,10 +35,13 @@ export function usePushNotifications() {
       return;
     }
 
-    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    // With this:
+    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY 
+    || 'BOKIDUsRrxXrhkF76-sulTMuWFwW9YYUhFzcmKLySLPLj0kfRJMFLKPi1xc3nV13sj6LRuie6JQgzTb8YST1a0o'; // ← paste your actual public key
+
     if (!vapidKey) {
-      console.error('[SaVest] NEXT_PUBLIC_VAPID_PUBLIC_KEY is missing!');
-      return;
+    console.error('[SaVest] NEXT_PUBLIC_VAPID_PUBLIC_KEY is missing!');
+    return;
     }
 
     async function setup() {

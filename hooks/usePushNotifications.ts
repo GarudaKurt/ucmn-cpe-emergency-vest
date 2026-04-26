@@ -75,7 +75,7 @@ export function usePushNotifications() {
         }
 
         // 5. Convert VAPID key to Uint8Array — this is the critical fix
-        const applicationServerKey = urlBase64ToUint8Array(vapidKey);
+        const applicationServerKey = urlBase64ToUint8Array(vapidKey!);
 
         // 6. Subscribe
         const sub = await reg.pushManager.subscribe({

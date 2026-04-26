@@ -43,28 +43,24 @@ export function usePushNotifications() {
 
     async function setup() {
       try {
-        // 1. Request permission
         const permission = await Notification.requestPermission();
         if (permission !== 'granted') {
           console.warn('[SaVest] Notification permission denied.');
           return;
         }
 
-        // 2. Register service worker
         const reg = await navigator.serviceWorker.register('/sw.js', {
           scope: '/',
           updateViaCache: 'none',
         });
 
-        // 3. Wait for SW to be ready
         await navigator.serviceWorker.ready;
 
-        // 4. Check for existing subscription first
+        // Check for existing subscription first
         const existingSub = await reg.pushManager.getSubscription();
         if (existingSub) {
-          // Already subscribed — just re-save to Firestore in case it changed
           const deviceId = getDeviceId();
-          await fetch('/api/subscribe', {
+          await fetch('/api/push/subscribe', { // ✅ fixed path
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ subscription: existingSub.toJSON(), deviceId }),
@@ -74,17 +70,15 @@ export function usePushNotifications() {
           return;
         }
 
-        // 5. Convert VAPID key to Uint8Array — this is the critical fix
         const applicationServerKey = urlBase64ToUint8Array(vapidKey!);
 
-        // 6. Subscribe
         const sub = await reg.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: applicationServerKey.buffer as ArrayBuffer,
+          userVisibleOnly: true,
+          applicationServerKey: applicationServerKey.buffer as ArrayBuffer,
         });
-        // 7. Save subscription to Firestore
+
         const deviceId = getDeviceId();
-        const res = await fetch('/api/subscribe', {
+        const res = await fetch('/api/push/subscribe', { // ✅ fixed path
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ subscription: sub.toJSON(), deviceId }),
@@ -107,13 +101,12 @@ export function usePushNotifications() {
 
 export async function sendPushAlert(title: string, body: string, tag?: string) {
   try {
-    const res = await fetch('/api/send', {
+    const res = await fetch('/api/push/send', { // ✅ fixed path
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body, tag, url: '/' }),
     });
-    // Temporary debug log
-    console.log('[SaVest] Push send status:', res.status, res.statusText);
+    console.log('[SaVest] Push send status:', res.status);
   } catch (err) {
     console.error('[SaVest] Failed to send push alert:', err);
   }

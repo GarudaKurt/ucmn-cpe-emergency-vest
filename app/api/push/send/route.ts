@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import webpush from '@/lib/webpush';
+import { sendWebPush } from '@/lib/webpush';   // ✅ use new function
 import { firestore } from '@/config/firebase';
 import { collection, getDocs } from 'firebase/firestore';
 
-// ✅ Add this line
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   const { title, body, tag, url } = await req.json();
@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
 
   const results = await Promise.allSettled(
     subscriptions.map((sub) =>
-      webpush.sendNotification(
+      sendWebPush(
         sub,
         JSON.stringify({ title, body, tag, url: url || '/', icon: '/icon.png' })
       )

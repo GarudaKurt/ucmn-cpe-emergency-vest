@@ -4,6 +4,7 @@ import { doc, setDoc } from 'firebase/firestore';
 
 // ✅ Add this line
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic'; // ✅ Add this too
 
 export async function POST(req: NextRequest) {
   const body = await req.json();

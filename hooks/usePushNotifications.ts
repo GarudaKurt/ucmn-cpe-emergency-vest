@@ -107,11 +107,13 @@ export function usePushNotifications() {
 
 export async function sendPushAlert(title: string, body: string, tag?: string) {
   try {
-    await fetch('/api/send', {
+    const res = await fetch('/api/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body, tag, url: '/' }),
     });
+    // Temporary debug log
+    console.log('[SaVest] Push send status:', res.status, res.statusText);
   } catch (err) {
     console.error('[SaVest] Failed to send push alert:', err);
   }

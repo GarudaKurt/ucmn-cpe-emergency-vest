@@ -79,10 +79,9 @@ export function usePushNotifications() {
 
         // 6. Subscribe
         const sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey,  // ✅ Uint8Array, not raw string
+            userVisibleOnly: true,
+            applicationServerKey: applicationServerKey.buffer as ArrayBuffer,
         });
-
         // 7. Save subscription to Firestore
         const deviceId = getDeviceId();
         const res = await fetch('/api/subscribe', {

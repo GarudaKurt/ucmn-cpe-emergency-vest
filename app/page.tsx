@@ -1861,43 +1861,78 @@ export default function SaVestDashboard() {
                     ))}
                   </TableRow>
                 </TableHeader>
-                <TableBody>
-                  {alerts.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={10} className="text-center text-slate-400 py-10">
-                        No alerts yet — they appear automatically when sensor thresholds are exceeded.
+              <TableBody>
+              {alerts.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={10} className="text-center text-slate-400 py-10">
+                    No alerts yet — they appear automatically when sensor thresholds are exceeded.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                [...alerts]
+                  .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                  .map((log, i) => (
+                    <TableRow key={i} className="border-orange-50 hover:bg-orange-50/60 transition-colors">
+
+                      <TableCell className="text-slate-400 font-mono text-xs">
+                        {log.timestamp}
                       </TableCell>
+
+                      <TableCell className="text-slate-800 font-semibold">
+                        {log.vest}
+                      </TableCell>
+
+                      <TableCell>
+                        <Badge className={cn(
+                          "rounded-full text-xs font-medium border inline-flex items-center gap-1",
+                          log.alertType === "Need Rescue" || log.alertType === "Fall Detected"
+                            ? "border-red-200 bg-red-50 text-red-700"
+                            : "border-amber-200 bg-amber-50 text-amber-700"
+                        )}>
+                          {log.alertType === "Fall Detected"
+                            ? <TbRotate className="text-sm" />
+                            : log.alertType === "Need Rescue"
+                              ? <MdOutlineSos className="text-sm" />
+                              : <MdOutlineWarningAmber className="text-sm" />}
+                          {log.alertType}
+                        </Badge>
+                      </TableCell>
+
+                      <TableCell><ZoneBadge active={log.zoneA} /></TableCell>
+                      <TableCell><ZoneBadge active={log.zoneB} /></TableCell>
+
+                      <TableCell className={cn(
+                        "font-mono text-sm font-semibold",
+                        log.dust > THRESHOLDS.dust ? "text-red-500" : "text-slate-600"
+                      )}>
+                        {log.dust}%
+                      </TableCell>
+
+                      <TableCell className={cn(
+                        "font-mono text-sm font-semibold",
+                        log.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-slate-600"
+                      )}>
+                        {log.coGas}%
+                      </TableCell>
+
+                      <TableCell className={cn(
+                        "font-mono text-sm font-semibold",
+                        log.aqi > getAqiThreshold(log.vest) ? "text-amber-500" : "text-slate-600"
+                      )}>
+                        {log.aqi}%
+                      </TableCell>
+
+                      <TableCell className={cn(
+                        "font-mono text-sm font-semibold",
+                        log.temp > THRESHOLDS.temp ? "text-red-500" : "text-slate-600"
+                      )}>
+                        {log.temp}°C
+                      </TableCell>
+
                     </TableRow>
-                  ) : (
-                    alerts.map((log, i) => (
-                      <TableRow key={i} className="border-orange-50 hover:bg-orange-50/60 transition-colors">
-                        <TableCell className="text-slate-400 font-mono text-xs">{log.timestamp}</TableCell>
-                        <TableCell className="text-slate-800 font-semibold">{log.vest}</TableCell>
-                        <TableCell>
-                          <Badge className={cn(
-                            "rounded-full text-xs font-medium border inline-flex items-center gap-1",
-                            log.alertType === "Need Rescue" || log.alertType === "Fall Detected"
-                              ? "border-red-200 bg-red-50 text-red-700"
-                              : "border-amber-200 bg-amber-50 text-amber-700"
-                          )}>
-                            {log.alertType === "Fall Detected"
-                              ? <TbRotate className="text-sm" />
-                              : log.alertType === "Need Rescue"
-                                ? <MdOutlineSos className="text-sm" />
-                                : <MdOutlineWarningAmber className="text-sm" />}
-                            {log.alertType}
-                          </Badge>
-                        </TableCell>
-                        <TableCell><ZoneBadge active={log.zoneA} /></TableCell>
-                        <TableCell><ZoneBadge active={log.zoneB} /></TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", log.dust  > THRESHOLDS.dust  ? "text-red-500"   : "text-slate-600")}>{log.dust}%</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", log.coGas > THRESHOLDS.coGas ? "text-amber-500" : "text-slate-600")}>{log.coGas}%</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", log.aqi > getAqiThreshold(log.vest)   ? "text-amber-500" : "text-slate-600")}>{log.aqi}%</TableCell>
-                        <TableCell className={cn("font-mono text-sm font-semibold", log.temp  > THRESHOLDS.temp  ? "text-red-500"   : "text-slate-600")}>{log.temp}°C</TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
+                  ))
+              )}
+            </TableBody>
               </Table>
             </div>
           </div>

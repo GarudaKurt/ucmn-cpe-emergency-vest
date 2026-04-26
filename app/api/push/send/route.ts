@@ -3,6 +3,9 @@ import webpush from '@/lib/webpush';
 import { firestore } from '@/config/firebase';
 import { collection, getDocs } from 'firebase/firestore';
 
+// ✅ Add this line
+export const runtime = 'nodejs';
+
 export async function POST(req: NextRequest) {
   const { title, body, tag, url } = await req.json();
 

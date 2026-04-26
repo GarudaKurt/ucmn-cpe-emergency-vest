@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { firestore } from '@/config/firebase';
 import { doc, setDoc } from 'firebase/firestore';
 
+// ✅ Add this line
+export const runtime = 'nodejs';
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const { subscription, deviceId } = body;

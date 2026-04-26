@@ -35,7 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
+import { usePushNotifications, sendPushAlert } from '@/hooks/usePushNotifications';
 import { MdOutlineWarningAmber, MdOutlineSos } from "react-icons/md";
 import { TbShirt, TbWind } from "react-icons/tb";
 import { RiRfidLine } from "react-icons/ri";
@@ -168,7 +168,7 @@ const DEPARTMENTS = [
 
 //const THRESHOLDS = { dust: 600, coGas: 1100, aqi: 559, temp: 37.0 }; //Vest 1: coGas is set to 1100 Vest2: coGas: 950 , and for Vest1 AQI is 550 and Vest2 950
 
-const THRESHOLDS = { dust: 600, coGas: 950, temp: 37.0 };
+const THRESHOLDS = { dust: 600, coGas: 1050, temp: 37.0 };
 const AQI_THRESHOLDS: Record<string, number> = {
   vest1: 550,
   vest2: 950,
@@ -1240,30 +1240,37 @@ export default function SaVestDashboard() {
   const forceFallRender = useCallback(() => setFallTick((n) => n + 1), []);
 
   const lastAlertRef = useRef<Record<string, string | null>>({});
+  usePushNotifications(); // registers the browser for push on mount
 
-  function startFallCountdown(vestKey: string) {
-    const fs = fallStateRef.current[vestKey];
-    if (fs.inCountdown || fs.confirmed) return;
+    function startFallCountdown(vestKey: string) {
+      const fs = fallStateRef.current[vestKey];
+      if (fs.inCountdown || fs.confirmed) return;
 
-    fs.inCountdown = true;
-    fs.secondsLeft = FALL_CONFIRM_SECONDS;
-    forceFallRender();
+      fs.inCountdown = true;
+      fs.secondsLeft = FALL_CONFIRM_SECONDS;
+      forceFallRender();
 
-    const id = setInterval(() => {
-      const state = fallStateRef.current[vestKey];
-      state.secondsLeft -= 1;
-      if (state.secondsLeft <= 0) {
-        clearInterval(id);
-        state.intervalId  = null;
-        state.inCountdown = false;
-        state.confirmed   = true;
-        forceFallRender();
-      } else {
-        forceFallRender();
-      }
-    }, 1000);
+      const id = setInterval(() => {
+        const state = fallStateRef.current[vestKey];
+        state.secondsLeft -= 1;
+        if (state.secondsLeft <= 0) {
+          clearInterval(id);
+          state.intervalId  = null;
+          state.inCountdown = false;
+          state.confirmed   = true;
+          forceFallRender();
+          // ✅ Only fires here — when fall is actually confirmed after 9s
+          sendPushAlert(
+            `🚨 FALL CONFIRMED — ${vestKey.toUpperCase()}`,
+            `Worker has been fallen for ${FALL_CONFIRM_SECONDS}s. Dispatch rescue immediately!`,
+            `${vestKey}-fall`
+          );
+        } else {
+          forceFallRender();
+        }
+      }, 1000);
 
-    fs.intervalId = id;
+      fs.intervalId = id;
   }
 
   function cancelFallCountdown(vestKey: string) {
@@ -1370,19 +1377,25 @@ export default function SaVestDashboard() {
             fallDetected: sensors.fallDetected,
           });
 
-          const alertType = deriveAlertType(sensors, fs.confirmed, vestKey);
-          if (alertType && alertType !== lastAlertRef.current[vestKey]) {
-            lastAlertRef.current[vestKey] = alertType;
-            push(ref(database, "alerts"), {
-              timestamp: new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" }),
-              vest: vestKey, alertType,
-              zoneA: sensors.zoneA, zoneB: sensors.zoneB,
-              dust: sensors.dust, coGas: sensors.coGas,
-              aqi: sensors.aqi, temp: sensors.temp,
-            });
-          }
-          if (!alertType && lastAlertRef.current[vestKey]) lastAlertRef.current[vestKey] = null;
-
+        // ✅ FIXED — sendPushAlert is INSIDE the if block, only fires on new alert
+        const alertType = deriveAlertType(sensors, fs.confirmed, vestKey);
+        if (alertType && alertType !== lastAlertRef.current[vestKey]) {
+          lastAlertRef.current[vestKey] = alertType;
+          push(ref(database, "alerts"), {
+            timestamp: new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" }),
+            vest: vestKey, alertType,
+            zoneA: sensors.zoneA, zoneB: sensors.zoneB,
+            dust: sensors.dust, coGas: sensors.coGas,
+            aqi: sensors.aqi, temp: sensors.temp,
+          });
+          // ✅ Only fires once per new unique alert type
+          sendPushAlert(
+            `⚠️ SaVest Alert — ${vestKey.toUpperCase()}`,
+            `${alertType} detected. Dust: ${sensors.dust.toFixed(1)}% | CO: ${sensors.coGas.toFixed(1)}% | Temp: ${sensors.temp.toFixed(1)}°C`,
+            `${vestKey}-${alertType}`
+          );
+        }
+        if (!alertType && lastAlertRef.current[vestKey]) lastAlertRef.current[vestKey] = null;
           return updated;
         });
       });
